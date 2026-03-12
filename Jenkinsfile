@@ -244,7 +244,7 @@ Images on Docker Hub:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
                     build(
-                        job: 'automation-tests',
+                        job: 'amazon-microservices-qa-pipeline',
                         parameters: [
                             string(name: 'IMAGE_TAG',    value: env.IMAGE_TAG),
                             string(name: 'TRIGGERED_BY', value: env.JOB_NAME),
