@@ -37,14 +37,18 @@ pipeline {
                         returnStdout: true
                     ).trim()
 
+                    // If empty (first commit) or no previous commit, build everything
+                    def buildAll = !changedFiles || changedFiles.isEmpty() || changedFiles == 'ALL'
+                    if (buildAll) changedFiles = 'ALL'
+
                     echo "Changed files:\n${changedFiles}"
 
-                    env.BUILD_USER_SERVICE    = changedFiles.contains('user-service')         || changedFiles == 'ALL' ? 'true' : 'false'
-                    env.BUILD_PRODUCT_SERVICE = changedFiles.contains('product-service')      || changedFiles == 'ALL' ? 'true' : 'false'
-                    env.BUILD_ORDER_SERVICE   = changedFiles.contains('order-service')        || changedFiles == 'ALL' ? 'true' : 'false'
-                    env.BUILD_PAYMENT_SERVICE = changedFiles.contains('payment-service')      || changedFiles == 'ALL' ? 'true' : 'false'
-                    env.BUILD_NOTIFICATION    = changedFiles.contains('notification-service') || changedFiles == 'ALL' ? 'true' : 'false'
-                    env.BUILD_GATEWAY         = changedFiles.contains('api-gateway')          || changedFiles == 'ALL' ? 'true' : 'false'
+                    env.BUILD_USER_SERVICE    = buildAll || changedFiles.contains('user-service')         ? 'true' : 'false'
+                    env.BUILD_PRODUCT_SERVICE = buildAll || changedFiles.contains('product-service')      ? 'true' : 'false'
+                    env.BUILD_ORDER_SERVICE   = buildAll || changedFiles.contains('order-service')        ? 'true' : 'false'
+                    env.BUILD_PAYMENT_SERVICE = buildAll || changedFiles.contains('payment-service')      ? 'true' : 'false'
+                    env.BUILD_NOTIFICATION    = buildAll || changedFiles.contains('notification-service') ? 'true' : 'false'
+                    env.BUILD_GATEWAY         = buildAll || changedFiles.contains('api-gateway')          ? 'true' : 'false'
 
                     echo """
 Services to build:
@@ -198,7 +202,7 @@ Services to build:
                     // withCredentials injects username+password safely
                     // They are masked in logs — you will never see the actual token
                     withCredentials([usernamePassword(
-                        credentialsId: 'dockerhub-creds',
+                        credentialsId: 'dockerhub-credentials',
                         usernameVariable: 'DOCKER_USER',
                         passwordVariable: 'DOCKER_PASS'
                     )]) {
@@ -229,12 +233,6 @@ Images on Docker Hub:
 
         // ── Stage 5: Trigger Automation Pipeline ─────────────────
         stage('Trigger Automation Tests') {
-            when {
-                anyOf {
-                    branch 'main'
-                    branch 'develop'
-                }
-            }
             steps {
                 script {
                     echo """
