@@ -38,8 +38,8 @@ services:
       POSTGRES_PASSWORD: amazon123
     ports:
       - "5432:5432"
-    volumes:
-      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    # Volume mount removed — Spring Boot auto-creates tables via JPA/Hibernate
+    # (spring.jpa.hibernate.ddl-auto=create-drop in application.yml)
     networks:
       - test-net
     # tmpfs = RAM disk. Postgres data lives in memory.
