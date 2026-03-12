@@ -1,0 +1,90 @@
+---
+# User Service ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: user-service-config
+  namespace: amazon
+data:
+  SPRING_PROFILES_ACTIVE: "kubernetes"
+  SERVER_PORT: "8081"
+  SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres-service:5432/users_db"
+  SPRING_DATA_REDIS_HOST: "redis-service"
+  SPRING_DATA_REDIS_PORT: "6379"
+  SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka-service:29092"
+  MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: "http://zipkin-service:9411/api/v2/spans"
+  MANAGEMENT_TRACING_SAMPLING_PROBABILITY: "1.0"
+  LOGGING_LEVEL_COM_AMAZON: "INFO"
+---
+# Product Service ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: product-service-config
+  namespace: amazon
+data:
+  SPRING_PROFILES_ACTIVE: "kubernetes"
+  SERVER_PORT: "8082"
+  SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres-service:5432/products_db"
+  SPRING_DATA_REDIS_HOST: "redis-service"
+  SPRING_DATA_REDIS_PORT: "6379"
+  SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka-service:29092"
+  MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: "http://zipkin-service:9411/api/v2/spans"
+---
+# Order Service ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-service-config
+  namespace: amazon
+data:
+  SPRING_PROFILES_ACTIVE: "kubernetes"
+  SERVER_PORT: "8083"
+  SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres-service:5432/orders_db"
+  SPRING_DATA_REDIS_HOST: "redis-service"
+  SPRING_DATA_REDIS_PORT: "6379"
+  SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka-service:29092"
+  MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: "http://zipkin-service:9411/api/v2/spans"
+  RESILIENCE4J_CIRCUITBREAKER_INSTANCES_PAYMENTSERVICE_FAILURE_RATE_THRESHOLD: "50"
+  RESILIENCE4J_CIRCUITBREAKER_INSTANCES_PAYMENTSERVICE_WAIT_DURATION_IN_OPEN_STATE: "30s"
+---
+# Payment Service ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payment-service-config
+  namespace: amazon
+data:
+  SPRING_PROFILES_ACTIVE: "kubernetes"
+  SERVER_PORT: "8084"
+  SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres-service:5432/payments_db"
+  SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka-service:29092"
+  MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: "http://zipkin-service:9411/api/v2/spans"
+---
+# Notification Service ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: notification-service-config
+  namespace: amazon
+data:
+  SPRING_PROFILES_ACTIVE: "kubernetes"
+  SERVER_PORT: "8085"
+  SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka-service:29092"
+  MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: "http://zipkin-service:9411/api/v2/spans"
+---
+# API Gateway ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-gateway-config
+  namespace: amazon
+data:
+  SPRING_PROFILES_ACTIVE: "kubernetes"
+  SERVER_PORT: "8080"
+  USER_SERVICE_URL: "http://user-service:8081"
+  PRODUCT_SERVICE_URL: "http://product-service:8082"
+  ORDER_SERVICE_URL: "http://order-service:8083"
+  PAYMENT_SERVICE_URL: "http://payment-service:8084"
+  SPRING_DATA_REDIS_HOST: "redis-service"
+  MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: "http://zipkin-service:9411/api/v2/spans"

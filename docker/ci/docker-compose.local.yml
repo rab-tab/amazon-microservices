@@ -1,0 +1,336 @@
+# ════════════════════════════════════════════════════════════════
+# Local Test Environment Docker Compose
+# File: amazon-microservices/docker/ci/docker-compose.local.yml
+#
+# Used BY the automation pipeline — not started manually.
+# The automation Jenkinsfile does:
+#   docker-compose -f docker-compose.local.yml up -d postgres redis kafka
+#   ... wait for health ...
+#   docker-compose -f docker-compose.local.yml up -d user-service ...
+#   ... run tests ...
+#   docker-compose -f docker-compose.local.yml down -v
+#
+# Container naming: prefix "test-" to avoid clashing with any
+# containers you might have running from other docker-compose files.
+#
+# Images: pulled from localhost:5000 (local registry)
+#         pushed there by the dev pipeline
+# ════════════════════════════════════════════════════════════════
+
+version: '3.8'
+
+# Label all containers — used for selective cleanup
+x-test-label: &test-label
+  labels:
+    project: "amazon-local"
+    managed-by: "jenkins-automation-pipeline"
+
+services:
+
+  # ── Infrastructure ─────────────────────────────────────────────
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: test-postgres
+    <<: *test-label
+    environment:
+      POSTGRES_USER: amazon
+      POSTGRES_PASSWORD: amazon123
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    networks:
+      - test-net
+    # tmpfs = RAM disk. Postgres data lives in memory.
+    # WHY? Much faster than disk I/O in tests. Data doesn't need to survive.
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U amazon"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  redis:
+    image: redis:7-alpine
+    container_name: test-redis
+    <<: *test-label
+    ports:
+      - "6379:6379"
+    command: redis-server --requirepass redis123 --maxmemory 64mb --maxmemory-policy allkeys-lru
+    networks:
+      - test-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redis123", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: 96M
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: test-zookeeper
+    <<: *test-label
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      KAFKA_HEAP_OPTS: "-Xmx96m -Xms48m"
+    networks:
+      - test-net
+    deploy:
+      resources:
+        limits:
+          memory: 160M
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: test-kafka
+    <<: *test-label
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      # PLAINTEXT_HOST = how external tools (tests, CLI) reach Kafka
+      # PLAINTEXT      = how containers reach each other internally
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_HEAP_OPTS: "-Xmx256m -Xms128m"
+      KAFKA_LOG_RETENTION_MS: 300000      # 5 min — ephemeral test data
+    networks:
+      - test-net
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+
+  zipkin:
+    image: openzipkin/zipkin-slim:latest
+    container_name: test-zipkin
+    <<: *test-label
+    ports:
+      - "9411:9411"
+    networks:
+      - test-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  # ── Microservices ──────────────────────────────────────────────
+  # All pull from localhost:5000 (local registry)
+  # IMAGE_TAG is set by the automation pipeline from the parameter
+  # passed by the dev pipeline
+
+  user-service:
+    image: localhost:5000/amazon/user-service:${IMAGE_TAG:-latest}
+    container_name: test-user-service
+    <<: *test-label
+    ports:
+      - "8081:8081"
+    environment:
+      SPRING_PROFILES_ACTIVE: local-test
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/users_db
+      SPRING_DATASOURCE_USERNAME: amazon
+      SPRING_DATASOURCE_PASSWORD: amazon123
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PASSWORD: redis123
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_SECURITY_JWT_SECRET: local-test-jwt-secret-minimum-256-bits-required-here
+      MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: http://zipkin:9411/api/v2/spans
+      # Aggressive JVM tuning — tests don't need much heap per service
+      JAVA_OPTS: "-Xms48m -Xmx96m -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom"
+    networks:
+      - test-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/actuator/health | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 45s
+    deploy:
+      resources:
+        limits:
+          memory: 192M
+
+  product-service:
+    image: localhost:5000/amazon/product-service:${IMAGE_TAG:-latest}
+    container_name: test-product-service
+    <<: *test-label
+    ports:
+      - "8082:8082"
+    environment:
+      SPRING_PROFILES_ACTIVE: local-test
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/products_db
+      SPRING_DATASOURCE_USERNAME: amazon
+      SPRING_DATASOURCE_PASSWORD: amazon123
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PASSWORD: redis123
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      JAVA_OPTS: "-Xms48m -Xmx96m -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom"
+    networks:
+      - test-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8082/actuator/health | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 45s
+    deploy:
+      resources:
+        limits:
+          memory: 192M
+
+  order-service:
+    image: localhost:5000/amazon/order-service:${IMAGE_TAG:-latest}
+    container_name: test-order-service
+    <<: *test-label
+    ports:
+      - "8083:8083"
+    environment:
+      SPRING_PROFILES_ACTIVE: local-test
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/orders_db
+      SPRING_DATASOURCE_USERNAME: amazon
+      SPRING_DATASOURCE_PASSWORD: amazon123
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PASSWORD: redis123
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      JAVA_OPTS: "-Xms48m -Xmx96m -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom"
+    networks:
+      - test-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8083/actuator/health | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 45s
+    deploy:
+      resources:
+        limits:
+          memory: 192M
+
+  payment-service:
+    image: localhost:5000/amazon/payment-service:${IMAGE_TAG:-latest}
+    container_name: test-payment-service
+    <<: *test-label
+    ports:
+      - "8084:8084"
+    environment:
+      SPRING_PROFILES_ACTIVE: local-test
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/payments_db
+      SPRING_DATASOURCE_USERNAME: amazon
+      SPRING_DATASOURCE_PASSWORD: amazon123
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      JAVA_OPTS: "-Xms40m -Xmx80m -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom"
+    networks:
+      - test-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8084/actuator/health | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 45s
+    deploy:
+      resources:
+        limits:
+          memory: 160M
+
+  notification-service:
+    image: localhost:5000/amazon/notification-service:${IMAGE_TAG:-latest}
+    container_name: test-notification-service
+    <<: *test-label
+    ports:
+      - "8085:8085"
+    environment:
+      SPRING_PROFILES_ACTIVE: local-test
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      JAVA_OPTS: "-Xms32m -Xmx64m -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom"
+    networks:
+      - test-net
+    depends_on:
+      kafka:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  api-gateway:
+    image: localhost:5000/amazon/api-gateway:${IMAGE_TAG:-latest}
+    container_name: test-api-gateway
+    <<: *test-label
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: local-test
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PASSWORD: redis123
+      SPRING_SECURITY_JWT_SECRET: local-test-jwt-secret-minimum-256-bits-required-here
+      JAVA_OPTS: "-Xms40m -Xmx80m -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom"
+    networks:
+      - test-net
+    depends_on:
+      user-service:
+        condition: service_healthy
+      product-service:
+        condition: service_healthy
+      order-service:
+        condition: service_healthy
+      payment-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 160M
+
+networks:
+  test-net:
+    name: amazon-test-network
+    driver: bridge
