@@ -66,3 +66,4 @@ logging:
     org.springframework.kafka: INFO
 # init
 # rebuild
+# rebuild1
