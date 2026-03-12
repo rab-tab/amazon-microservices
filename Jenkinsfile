@@ -202,7 +202,7 @@ Services to build:
                     // withCredentials injects username+password safely
                     // They are masked in logs — you will never see the actual token
                     withCredentials([usernamePassword(
-                        credentialsId: 'dockerhub-credentials',
+                        credentialsId: 'dockerhub-creds',
                         usernameVariable: 'DOCKER_USER',
                         passwordVariable: 'DOCKER_PASS'
                     )]) {
