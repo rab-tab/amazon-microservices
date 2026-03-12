@@ -65,3 +65,4 @@ logging:
     com.amazon: DEBUG
     org.springframework.kafka: INFO
 # init
+# rebuild
