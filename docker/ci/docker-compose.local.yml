@@ -13,7 +13,7 @@
 # Container naming: prefix "test-" to avoid clashing with any
 # containers you might have running from other docker-compose files.
 #
-# Images: pulled from localhost:5000 (local registry)
+# Images: pulled from Docker Hub (rabtab)
 #         pushed there by the dev pipeline
 # ════════════════════════════════════════════════════════════════
 
@@ -137,12 +137,12 @@ services:
           memory: 128M
 
   # ── Microservices ──────────────────────────────────────────────
-  # All pull from localhost:5000 (local registry)
+  # All pull from Docker Hub: rabtab/amazon-<service>:<tag>
   # IMAGE_TAG is set by the automation pipeline from the parameter
   # passed by the dev pipeline
 
   user-service:
-    image: localhost:5000/amazon/user-service:${IMAGE_TAG:-latest}
+    image: rabtab/amazon-user-service:${IMAGE_TAG:-latest}
     container_name: test-user-service
     <<: *test-label
     ports:
@@ -180,7 +180,7 @@ services:
           memory: 192M
 
   product-service:
-    image: localhost:5000/amazon/product-service:${IMAGE_TAG:-latest}
+    image: rabtab/amazon-product-service:${IMAGE_TAG:-latest}
     container_name: test-product-service
     <<: *test-label
     ports:
@@ -213,7 +213,7 @@ services:
           memory: 192M
 
   order-service:
-    image: localhost:5000/amazon/order-service:${IMAGE_TAG:-latest}
+    image: rabtab/amazon-order-service:${IMAGE_TAG:-latest}
     container_name: test-order-service
     <<: *test-label
     ports:
@@ -246,7 +246,7 @@ services:
           memory: 192M
 
   payment-service:
-    image: localhost:5000/amazon/payment-service:${IMAGE_TAG:-latest}
+    image: rabtab/amazon-payment-service:${IMAGE_TAG:-latest}
     container_name: test-payment-service
     <<: *test-label
     ports:
@@ -277,7 +277,7 @@ services:
           memory: 160M
 
   notification-service:
-    image: localhost:5000/amazon/notification-service:${IMAGE_TAG:-latest}
+    image: rabtab/amazon-notification-service:${IMAGE_TAG:-latest}
     container_name: test-notification-service
     <<: *test-label
     ports:
@@ -297,7 +297,7 @@ services:
           memory: 128M
 
   api-gateway:
-    image: localhost:5000/amazon/api-gateway:${IMAGE_TAG:-latest}
+    image: rabtab/amazon-api-gateway:${IMAGE_TAG:-latest}
     container_name: test-api-gateway
     <<: *test-label
     ports:
