@@ -36,10 +36,26 @@ services:
     environment:
       POSTGRES_USER: amazon
       POSTGRES_PASSWORD: amazon123
+      # Single DB created by POSTGRES_DB.
+      # Additional DBs created via POSTGRES_INITDB_WALDIR trick below.
+      # WHY not mount init-db.sql? Volume mounts cause permission denied
+      # errors on Rancher Desktop / Mac Jenkins workspace paths.
+      POSTGRES_DB: users_db
     ports:
       - "5432:5432"
-    # Volume mount removed — Spring Boot auto-creates tables via JPA/Hibernate
-    # (spring.jpa.hibernate.ddl-auto=create-drop in application.yml)
+    # Create remaining databases after postgres starts
+    # healthcheck runs psql so we know postgres is ready before this fires
+    entrypoint: >
+      sh -c "
+        /usr/local/bin/docker-entrypoint.sh postgres &
+        PG_PID=$$!
+        until pg_isready -U amazon; do sleep 1; done
+        psql -U amazon -c 'CREATE DATABASE products_db;' 2>/dev/null || true
+        psql -U amazon -c 'CREATE DATABASE orders_db;' 2>/dev/null || true
+        psql -U amazon -c 'CREATE DATABASE payments_db;' 2>/dev/null || true
+        echo 'All databases created'
+        wait $$PG_PID
+      "
     networks:
       - test-net
     # tmpfs = RAM disk. Postgres data lives in memory.
@@ -142,7 +158,7 @@ services:
   # passed by the dev pipeline
 
   user-service:
-    image: rabtab/amazon-user-service:${IMAGE_TAG:-latest}
+    image: rabtab/amazon-user-service:${TAG_USER_SERVICE:-latest}
     container_name: test-user-service
     <<: *test-label
     ports:
@@ -180,7 +196,7 @@ services:
           memory: 192M
 
   product-service:
-    image: rabtab/amazon-product-service:${IMAGE_TAG:-latest}
+    image: rabtab/amazon-product-service:${TAG_PRODUCT_SERVICE:-latest}
     container_name: test-product-service
     <<: *test-label
     ports:
@@ -213,7 +229,7 @@ services:
           memory: 192M
 
   order-service:
-    image: rabtab/amazon-order-service:${IMAGE_TAG:-latest}
+    image: rabtab/amazon-order-service:${TAG_ORDER_SERVICE:-latest}
     container_name: test-order-service
     <<: *test-label
     ports:
@@ -246,7 +262,7 @@ services:
           memory: 192M
 
   payment-service:
-    image: rabtab/amazon-payment-service:${IMAGE_TAG:-latest}
+    image: rabtab/amazon-payment-service:${TAG_PAYMENT_SERVICE:-latest}
     container_name: test-payment-service
     <<: *test-label
     ports:
@@ -277,7 +293,7 @@ services:
           memory: 160M
 
   notification-service:
-    image: rabtab/amazon-notification-service:${IMAGE_TAG:-latest}
+    image: rabtab/amazon-notification-service:${TAG_NOTIFICATION_SERVICE:-latest}
     container_name: test-notification-service
     <<: *test-label
     ports:
@@ -297,7 +313,7 @@ services:
           memory: 128M
 
   api-gateway:
-    image: rabtab/amazon-api-gateway:${IMAGE_TAG:-latest}
+    image: rabtab/amazon-api-gateway:${TAG_API_GATEWAY:-latest}
     container_name: test-api-gateway
     <<: *test-label
     ports:
