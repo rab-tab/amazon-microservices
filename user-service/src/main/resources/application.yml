@@ -64,4 +64,4 @@ logging:
   level:
     com.amazon: DEBUG
     org.springframework.kafka: INFO
-
+# init
