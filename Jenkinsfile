@@ -243,14 +243,9 @@ Images on Docker Hub:
         }
 
         // ── Stage 5: Trigger Automation Pipeline ─────────────────
-        // ONLY triggers if at least one service image was actually pushed.
-        // If the commit only changed Jenkinsfile, docker-compose, README etc.
-        // then no images were pushed → QA pipeline would fail trying to pull
-        // a tag that doesn't exist on Docker Hub.
+        // Always triggers regardless of what changed.
+        // The automation pipeline handles missing tags by falling back to :latest.
         stage('Trigger Automation Tests') {
-            when {
-                expression { return env.IMAGES_PUSHED == 'true' }
-            }
             steps {
                 script {
                     echo """
