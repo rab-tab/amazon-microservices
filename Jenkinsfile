@@ -208,6 +208,7 @@ Services to build:
                     )]) {
                         sh 'echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin'
 
+                        def pushed = 0
                         services.each { svc ->
                             if (svc.build == 'true') {
                                 def imageName = "${DOCKERHUB_USER}/${PROJECT}-${svc.name}"
@@ -216,7 +217,17 @@ Services to build:
                                     docker push ${imageName}:latest
                                     echo "✅ Pushed ${imageName}:${IMAGE_TAG}"
                                 """
+                                pushed++
                             }
+                        }
+
+                        // Set flag so QA pipeline only triggers when images were actually pushed
+                        if (pushed > 0) {
+                            env.IMAGES_PUSHED = 'true'
+                            echo "📦 ${pushed} image(s) pushed — QA pipeline will be triggered"
+                        } else {
+                            env.IMAGES_PUSHED = 'false'
+                            echo "⏭️  No images pushed — QA pipeline will be skipped"
                         }
 
                         sh 'docker logout'
@@ -232,7 +243,14 @@ Images on Docker Hub:
         }
 
         // ── Stage 5: Trigger Automation Pipeline ─────────────────
+        // ONLY triggers if at least one service image was actually pushed.
+        // If the commit only changed Jenkinsfile, docker-compose, README etc.
+        // then no images were pushed → QA pipeline would fail trying to pull
+        // a tag that doesn't exist on Docker Hub.
         stage('Trigger Automation Tests') {
+            when {
+                expression { return env.IMAGES_PUSHED == 'true' }
+            }
             steps {
                 script {
                     echo """
