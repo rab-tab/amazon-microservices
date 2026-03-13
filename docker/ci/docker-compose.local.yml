@@ -36,26 +36,9 @@ services:
     environment:
       POSTGRES_USER: amazon
       POSTGRES_PASSWORD: amazon123
-      # Single DB created by POSTGRES_DB.
-      # Additional DBs created via POSTGRES_INITDB_WALDIR trick below.
-      # WHY not mount init-db.sql? Volume mounts cause permission denied
-      # errors on Rancher Desktop / Mac Jenkins workspace paths.
       POSTGRES_DB: users_db
     ports:
       - "5432:5432"
-    # Create remaining databases after postgres starts
-    # healthcheck runs psql so we know postgres is ready before this fires
-    entrypoint: >
-      sh -c "
-        /usr/local/bin/docker-entrypoint.sh postgres &
-        PG_PID=$$!
-        until pg_isready -U amazon; do sleep 1; done
-        psql -U amazon -c 'CREATE DATABASE products_db;' 2>/dev/null || true
-        psql -U amazon -c 'CREATE DATABASE orders_db;' 2>/dev/null || true
-        psql -U amazon -c 'CREATE DATABASE payments_db;' 2>/dev/null || true
-        echo 'All databases created'
-        wait $$PG_PID
-      "
     networks:
       - test-net
     # tmpfs = RAM disk. Postgres data lives in memory.
@@ -63,7 +46,7 @@ services:
     tmpfs:
       - /var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U amazon"]
+      test: ["CMD-SHELL", "pg_isready -U amazon -d users_db"]
       interval: 5s
       timeout: 3s
       retries: 15
@@ -71,6 +54,28 @@ services:
       resources:
         limits:
           memory: 256M
+
+  # ── Database Initializer ──────────────────────────────────────
+  # Runs ONCE after postgres is healthy, creates remaining databases,
+  # then exits. No file mounts needed — avoids Rancher Desktop permission errors.
+  db-init:
+    image: postgres:15-alpine
+    container_name: test-db-init
+    <<: *test-label
+    environment:
+      PGPASSWORD: amazon123
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      sh -c "
+        psql -h postgres -U amazon -d users_db -c 'CREATE DATABASE products_db' 2>/dev/null || true &&
+        psql -h postgres -U amazon -d users_db -c 'CREATE DATABASE orders_db' 2>/dev/null || true &&
+        psql -h postgres -U amazon -d users_db -c 'CREATE DATABASE payments_db' 2>/dev/null || true &&
+        echo 'All databases initialised'
+      "
+    networks:
+      - test-net
 
   redis:
     image: redis:7-alpine
