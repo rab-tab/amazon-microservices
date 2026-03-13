@@ -50,10 +50,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 15
-    deploy:
-      resources:
-        limits:
-          memory: 256M
 
   # ── Database Initializer ──────────────────────────────────────
   # Runs ONCE after postgres is healthy, creates remaining databases,
@@ -91,10 +87,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
-    deploy:
-      resources:
-        limits:
-          memory: 96M
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
@@ -106,10 +98,6 @@ services:
       KAFKA_HEAP_OPTS: "-Xmx96m -Xms48m"
     networks:
       - test-net
-    deploy:
-      resources:
-        limits:
-          memory: 160M
 
   kafka:
     image: confluentinc/cp-kafka:7.5.0
@@ -129,7 +117,7 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
-      KAFKA_HEAP_OPTS: "-Xmx256m -Xms128m"
+      KAFKA_HEAP_OPTS: "-Xmx192m -Xms96m"
       KAFKA_LOG_RETENTION_MS: 300000      # 5 min — ephemeral test data
     networks:
       - test-net
@@ -139,10 +127,6 @@ services:
       timeout: 10s
       retries: 15
       start_period: 30s
-    deploy:
-      resources:
-        limits:
-          memory: 384M
 
   zipkin:
     image: openzipkin/zipkin-slim:latest
@@ -152,10 +136,6 @@ services:
       - "9411:9411"
     networks:
       - test-net
-    deploy:
-      resources:
-        limits:
-          memory: 128M
 
   # ── Microservices ──────────────────────────────────────────────
   # All pull from Docker Hub: rabtab/amazon-<service>:<tag>
@@ -195,10 +175,6 @@ services:
       timeout: 5s
       retries: 15
       start_period: 45s
-    deploy:
-      resources:
-        limits:
-          memory: 192M
 
   product-service:
     image: rabtab/amazon-product-service:${TAG_PRODUCT_SERVICE:-latest}
@@ -228,10 +204,6 @@ services:
       timeout: 5s
       retries: 15
       start_period: 45s
-    deploy:
-      resources:
-        limits:
-          memory: 192M
 
   order-service:
     image: rabtab/amazon-order-service:${TAG_ORDER_SERVICE:-latest}
@@ -261,10 +233,6 @@ services:
       timeout: 5s
       retries: 15
       start_period: 45s
-    deploy:
-      resources:
-        limits:
-          memory: 192M
 
   payment-service:
     image: rabtab/amazon-payment-service:${TAG_PAYMENT_SERVICE:-latest}
@@ -292,10 +260,6 @@ services:
       timeout: 5s
       retries: 15
       start_period: 45s
-    deploy:
-      resources:
-        limits:
-          memory: 160M
 
   notification-service:
     image: rabtab/amazon-notification-service:${TAG_NOTIFICATION_SERVICE:-latest}
@@ -312,10 +276,6 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          memory: 128M
 
   api-gateway:
     image: rabtab/amazon-api-gateway:${TAG_API_GATEWAY:-latest}
@@ -346,10 +306,6 @@ services:
       timeout: 5s
       retries: 15
       start_period: 30s
-    deploy:
-      resources:
-        limits:
-          memory: 160M
 
 networks:
   test-net:
