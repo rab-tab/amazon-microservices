@@ -162,6 +162,7 @@ services:
       SPRING_DATA_REDIS_PASSWORD: redis123
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       SPRING_SECURITY_JWT_SECRET: local-test-jwt-secret-minimum-256-bits-required-here
+      MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: http://zipkin:9411/api/v2/spans
       # Aggressive JVM tuning — tests don't need much heap per service
       JAVA_OPTS: "-Xms128m -Xmx256m -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom"
     networks:
@@ -308,7 +309,16 @@ services:
       SPRING_PROFILES_ACTIVE: local-test
       SPRING_DATA_REDIS_HOST: redis
       SPRING_DATA_REDIS_PASSWORD: redis123
+      MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: http://zipkin:9411/api/v2/spans
       SPRING_SECURITY_JWT_SECRET: local-test-jwt-secret-minimum-256-bits-required-here
+      # Override route URIs to use container names instead of localhost
+      SPRING_CLOUD_GATEWAY_ROUTES_0_URI: http://user-service:8081
+      SPRING_CLOUD_GATEWAY_ROUTES_1_URI: http://product-service:8082
+      SPRING_CLOUD_GATEWAY_ROUTES_2_URI: http://order-service:8083
+      SPRING_CLOUD_GATEWAY_ROUTES_3_URI: http://payment-service:8084
+      # WHY false? Spring Cloud Gateway is reactive — lazy init causes
+      # WeightCalculatorWebFilter to crash on startup with #block error
+      SPRING_MAIN_LAZY_INITIALIZATION: "false"
       JAVA_OPTS: "-Xms128m -Xmx256m -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom"
     networks:
       - test-net
