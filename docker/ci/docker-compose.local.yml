@@ -174,7 +174,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 15
-      start_period: 45s
+      start_period: 120s
 
   product-service:
     image: rabtab/amazon-product-service:${TAG_PRODUCT_SERVICE:-latest}
@@ -203,7 +203,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 15
-      start_period: 45s
+      start_period: 120s
 
   order-service:
     image: rabtab/amazon-order-service:${TAG_ORDER_SERVICE:-latest}
@@ -232,7 +232,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 15
-      start_period: 45s
+      start_period: 120s
 
   payment-service:
     image: rabtab/amazon-payment-service:${TAG_PAYMENT_SERVICE:-latest}
@@ -259,7 +259,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 15
-      start_period: 45s
+      start_period: 120s
 
   notification-service:
     image: rabtab/amazon-notification-service:${TAG_NOTIFICATION_SERVICE:-latest}
@@ -305,7 +305,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 15
-      start_period: 30s
+      start_period: 120s
 
 networks:
   test-net:
