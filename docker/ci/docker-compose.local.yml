@@ -303,7 +303,7 @@ services:
     container_name: test-api-gateway
     <<: *test-label
     ports:
-      - "8080:8080"
+      - "8090:8080"
     environment:
       # WHY docker profile? The gateway's application.yml has a 'docker' profile
       # with correct container hostnames (user-service:8081 etc).
@@ -314,24 +314,25 @@ services:
       MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: http://zipkin:9411/api/v2/spans
       SPRING_SECURITY_JWT_SECRET: local-test-jwt-secret-minimum-256-bits-required-here
       SPRING_MAIN_LAZY_INITIALIZATION: "false"
+      # WHY? Spring Security auto-config redirects /actuator/health to /login.
+      # Disable security auto-config so actuator is accessible without auth in tests.
+      SPRING_AUTOCONFIGURE_EXCLUDE: org.springframework.boot.autoconfigure.security.reactive.ReactiveSecurityAutoConfiguration,org.springframework.boot.autoconfigure.security.reactive.ReactiveUserDetailsServiceAutoConfiguration
       JAVA_OPTS: "-Xms128m -Xmx256m -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom"
     networks:
       - test-net
     depends_on:
-      user-service:
+      # WHY only redis/kafka? Gateway just proxies — it doesn't need backends
+      # healthy to start. Removing backend depends_on cuts startup wait by ~5min.
+      redis:
         condition: service_healthy
-      product-service:
-        condition: service_healthy
-      order-service:
-        condition: service_healthy
-      payment-service:
+      kafka:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health 2>/dev/null | grep -q \"status\""]
       interval: 10s
       timeout: 5s
       retries: 20
-      start_period: 420s
+      start_period: 120s
 
 networks:
   test-net:
