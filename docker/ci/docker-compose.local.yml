@@ -151,6 +151,7 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: local-test
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/users_db
+      MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: http://zipkin:9411/api/v2/spans
       SPRING_JPA_OPEN_IN_VIEW: "false"
       SPRING_MAIN_LAZY_INITIALIZATION: "true"
       SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: "3"
@@ -178,7 +179,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
-      start_period: 180s
+      start_period: 420s
 
   product-service:
     image: rabtab/amazon-product-service:${TAG_PRODUCT_SERVICE:-latest}
@@ -189,6 +190,7 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: local-test
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/products_db
+      MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: http://zipkin:9411/api/v2/spans
       SPRING_JPA_OPEN_IN_VIEW: "false"
       SPRING_MAIN_LAZY_INITIALIZATION: "true"
       SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: "3"
@@ -211,7 +213,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
-      start_period: 180s
+      start_period: 420s
 
   order-service:
     image: rabtab/amazon-order-service:${TAG_ORDER_SERVICE:-latest}
@@ -222,6 +224,7 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: local-test
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/orders_db
+      MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: http://zipkin:9411/api/v2/spans
       SPRING_JPA_OPEN_IN_VIEW: "false"
       SPRING_MAIN_LAZY_INITIALIZATION: "true"
       SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: "3"
@@ -244,7 +247,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
-      start_period: 180s
+      start_period: 420s
 
   payment-service:
     image: rabtab/amazon-payment-service:${TAG_PAYMENT_SERVICE:-latest}
@@ -261,7 +264,10 @@ services:
       SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE: "1"
       SPRING_DATASOURCE_USERNAME: amazon
       SPRING_DATASOURCE_PASSWORD: amazon123
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PASSWORD: redis123
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: http://zipkin:9411/api/v2/spans
       JAVA_OPTS: "-Xms128m -Xmx256m -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom"
     networks:
       - test-net
@@ -275,7 +281,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
-      start_period: 180s
+      start_period: 420s
 
   notification-service:
     image: rabtab/amazon-notification-service:${TAG_NOTIFICATION_SERVICE:-latest}
@@ -321,7 +327,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
-      start_period: 180s
+      start_period: 420s
 
 networks:
   test-net:
