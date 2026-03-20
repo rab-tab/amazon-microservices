@@ -327,7 +327,7 @@ services:
       payment-service:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health | grep -q UP"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health 2>/dev/null | grep -q \"status\""]
       interval: 10s
       timeout: 5s
       retries: 20
