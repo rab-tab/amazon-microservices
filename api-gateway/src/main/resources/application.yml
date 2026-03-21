@@ -72,6 +72,12 @@ management:
     web:
       exposure:
         include: health,info,prometheus,metrics,gateway
+  endpoint:
+    health:
+      show-details: always
+  # Permit actuator endpoints without auth (gateway uses servlet+reactive security)
+  security:
+    enabled: false
   metrics:
     export:
       prometheus:
@@ -119,7 +125,3 @@ spring:
   zipkin:
     tracing:
       endpoint: http://zipkin:9411/api/v2/spans
-# init
-# rebuild
-
-# rebuild1
