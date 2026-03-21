@@ -314,9 +314,6 @@ services:
       MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: http://zipkin:9411/api/v2/spans
       SPRING_SECURITY_JWT_SECRET: local-test-jwt-secret-minimum-256-bits-required-here
       SPRING_MAIN_LAZY_INITIALIZATION: "false"
-      # WHY? Spring Security auto-config redirects /actuator/health to /login.
-      # Disable security auto-config so actuator is accessible without auth in tests.
-      SPRING_AUTOCONFIGURE_EXCLUDE: org.springframework.boot.autoconfigure.security.reactive.ReactiveSecurityAutoConfiguration,org.springframework.boot.autoconfigure.security.reactive.ReactiveUserDetailsServiceAutoConfiguration,org.springframework.boot.actuate.autoconfigure.security.reactive.ReactiveManagementWebSecurityAutoConfiguration
       JAVA_OPTS: "-Xms128m -Xmx256m -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom"
     networks:
       - test-net
