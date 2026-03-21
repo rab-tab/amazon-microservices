@@ -162,8 +162,13 @@ services:
       SPRING_DATA_REDIS_PASSWORD: redis123
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       SPRING_SECURITY_JWT_SECRET: local-test-jwt-secret-minimum-256-bits-required-here
-      # Aggressive JVM tuning — tests don't need much heap per service
-      JAVA_OPTS: "-Xms128m -Xmx256m -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom"
+      # WHY JAVA_TOOL_OPTIONS? Unlike JAVA_OPTS, it's automatically read by the JVM
+      # before main() starts, so Spring Boot's JarLauncher picks it up correctly.
+      JAVA_TOOL_OPTIONS: "-Xms64m -Xmx256m -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Djava.security.egd=file:/dev/./urandom"
+      # WHY exclude Redis from health? Redis health check takes 13-58s under memory pressure,
+      # causing actuator/health to return SLOW/DOWN even when the service is functionally UP.
+      # The app still USES Redis — we just don't block startup on Redis health status.
+      MANAGEMENT_HEALTH_REDIS_ENABLED: "false"
     networks:
       - test-net
     depends_on:
@@ -178,7 +183,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
-      start_period: 420s
+      start_period: 600s
 
   product-service:
     image: rabtab/amazon-product-service:${TAG_PRODUCT_SERVICE:-latest}
@@ -199,7 +204,8 @@ services:
       SPRING_DATA_REDIS_HOST: redis
       SPRING_DATA_REDIS_PASSWORD: redis123
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      JAVA_OPTS: "-Xms128m -Xmx256m -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom"
+      JAVA_TOOL_OPTIONS: "-Xms64m -Xmx256m -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Djava.security.egd=file:/dev/./urandom"
+      MANAGEMENT_HEALTH_REDIS_ENABLED: "false"
     networks:
       - test-net
     depends_on:
@@ -212,7 +218,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
-      start_period: 420s
+      start_period: 600s
 
   order-service:
     image: rabtab/amazon-order-service:${TAG_ORDER_SERVICE:-latest}
@@ -233,7 +239,8 @@ services:
       SPRING_DATA_REDIS_HOST: redis
       SPRING_DATA_REDIS_PASSWORD: redis123
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      JAVA_OPTS: "-Xms128m -Xmx256m -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom"
+      JAVA_TOOL_OPTIONS: "-Xms64m -Xmx256m -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Djava.security.egd=file:/dev/./urandom"
+      MANAGEMENT_HEALTH_REDIS_ENABLED: "false"
     networks:
       - test-net
     depends_on:
@@ -246,7 +253,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
-      start_period: 420s
+      start_period: 600s
 
   payment-service:
     image: rabtab/amazon-payment-service:${TAG_PAYMENT_SERVICE:-latest}
@@ -267,7 +274,8 @@ services:
       SPRING_DATA_REDIS_PASSWORD: redis123
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: http://zipkin:9411/api/v2/spans
-      JAVA_OPTS: "-Xms128m -Xmx256m -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom"
+      JAVA_TOOL_OPTIONS: "-Xms64m -Xmx256m -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Djava.security.egd=file:/dev/./urandom"
+      MANAGEMENT_HEALTH_REDIS_ENABLED: "false"
     networks:
       - test-net
     depends_on:
@@ -280,7 +288,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
-      start_period: 420s
+      start_period: 600s
 
   notification-service:
     image: rabtab/amazon-notification-service:${TAG_NOTIFICATION_SERVICE:-latest}
@@ -291,7 +299,8 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: local-test
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      JAVA_OPTS: "-Xms64m -Xmx128m -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom"
+      JAVA_TOOL_OPTIONS: "-Xms64m -Xmx128m -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Djava.security.egd=file:/dev/./urandom"
+      MANAGEMENT_HEALTH_REDIS_ENABLED: "false"
     networks:
       - test-net
     depends_on:
@@ -314,7 +323,8 @@ services:
       MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: http://zipkin:9411/api/v2/spans
       SPRING_SECURITY_JWT_SECRET: local-test-jwt-secret-minimum-256-bits-required-here
       SPRING_MAIN_LAZY_INITIALIZATION: "false"
-      JAVA_OPTS: "-Xms128m -Xmx256m -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom"
+      JAVA_TOOL_OPTIONS: "-Xms64m -Xmx256m -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Djava.security.egd=file:/dev/./urandom"
+      MANAGEMENT_HEALTH_REDIS_ENABLED: "false"
     networks:
       - test-net
     depends_on:
