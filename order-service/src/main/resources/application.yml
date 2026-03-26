@@ -109,6 +109,20 @@ logging:
   level:
     com.amazon: DEBUG
     io.github.resilience4j: DEBUG
-# init
-# rebuild
-# rebuild1
+
+---
+# ── CI / local-test profile ──────────────────────────────────────
+spring:
+  config:
+    activate:
+      on-profile: local-test
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+  cache:
+    type: none
+
+management:
+  tracing:
+    sampling:
+      probability: 0.0

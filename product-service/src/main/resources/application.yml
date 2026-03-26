@@ -1,5 +1,6 @@
 server:
   port: 8082
+
 spring:
   application:
     name: product-service
@@ -52,6 +53,32 @@ management:
   zipkin:
     tracing:
       endpoint: http://localhost:9411/api/v2/spans
-# init
-# rebuild
-# rebuild1
+
+---
+# ── CI / local-test profile ──────────────────────────────────────
+# Activated when SPRING_PROFILES_ACTIVE=local-test (set by docker-compose)
+# WHY separate profile? Keeps production config clean while letting CI
+# override the slow/heavy settings that cause 600s+ startup times.
+spring:
+  config:
+    activate:
+      on-profile: local-test
+  jpa:
+    hibernate:
+      # WHY create-drop? In CI the DB is fresh every run (tmpfs postgres).
+      # 'update' diffs the existing schema which takes 10-30s.
+      # 'create-drop' skips the diff and just creates tables directly.
+      ddl-auto: create-drop
+  cache:
+    # WHY none? Disabling Redis cache in CI removes the Redis connection
+    # dependency at startup. The app still works — just no caching.
+    # Redis connection timeouts were causing 13-58s delays per health check.
+    type: none
+
+management:
+  tracing:
+    sampling:
+      # WHY 0.0? Zipkin tracing at 1.0 sends every request span to Zipkin.
+      # Under memory pressure Zipkin drops spans and logs 11s timeout errors
+      # that block the actuator health thread. Zero tracing = zero overhead.
+      probability: 0.0

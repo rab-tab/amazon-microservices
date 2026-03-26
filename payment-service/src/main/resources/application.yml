@@ -52,7 +52,20 @@ management:
   zipkin:
     tracing:
       endpoint: http://localhost:9411/api/v2/spans
-# init
-# rebuild
 
-# rebuild1
+---
+# ── CI / local-test profile ──────────────────────────────────────
+spring:
+  config:
+    activate:
+      on-profile: local-test
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+  cache:
+    type: none
+
+management:
+  tracing:
+    sampling:
+      probability: 0.0
