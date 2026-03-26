@@ -32,9 +32,4 @@ COPY --from=builder /app/application/ ./
 EXPOSE 8080
 
 # Container-aware JVM tuning
-ENTRYPOINT ["java",
-  "-XX:+UseContainerSupport",
-  "-XX:MaxRAMPercentage=75.0",
-  "-XX:+UseG1GC",
-  "-Djava.security.egd=file:/dev/./urandom",
-  "org.springframework.boot.loader.launch.JarLauncher"]
+ENTRYPOINT ["java","-XX:+UseContainerSupport","-XX:MaxRAMPercentage=75.0","-XX:+UseG1GC","-Djava.security.egd=file:/dev/./urandom","org.springframework.boot.loader.launch.JarLauncher"]
