@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────
-# Stage 1: Extract Spring Boot layers (disk-efficient)
+# Stage 1: Extract Spring Boot layers (disk-optimized)
 # ─────────────────────────────────────────────────────────────
 FROM eclipse-temurin:21-jre-alpine AS builder
 
@@ -8,34 +8,33 @@ WORKDIR /app
 # Explicit JAR name (MANDATORY for stability)
 ARG JAR_FILE=target/notification-service.jar
 
+# Copy only the required artifact
 COPY ${JAR_FILE} app.jar
 
-# Extract layers and immediately delete JAR to avoid duplication
+# Extract layers and remove original JAR to avoid duplication
 RUN java -Djarmode=layertools -jar app.jar extract \
     && rm app.jar
 
 # ─────────────────────────────────────────────────────────────
-# Stage 2: Runtime image (lean + cache-friendly)
+# Stage 2: Runtime image (minimal & cache-efficient)
 # ─────────────────────────────────────────────────────────────
 FROM eclipse-temurin:21-jre-alpine
 
 WORKDIR /app
 
-# Copy layers in optimal order for caching
+# Copy layers (ordered for maximum cache reuse)
 COPY --from=builder /app/dependencies/ ./
 COPY --from=builder /app/spring-boot-loader/ ./
 COPY --from=builder /app/snapshot-dependencies/ ./
 COPY --from=builder /app/application/ ./
 
-# Notification services are usually I/O bound → keep defaults flexible
+# Default port (override per service if needed)
 EXPOSE 8080
 
-# JVM tuned for container + async workloads (Kafka/email/etc.)
+# Container-aware JVM tuning
 ENTRYPOINT ["java",
   "-XX:+UseContainerSupport",
-  "-XX:MaxRAMPercentage=70.0",
+  "-XX:MaxRAMPercentage=75.0",
   "-XX:+UseG1GC",
-  "-XX:MaxGCPauseMillis=200",
   "-Djava.security.egd=file:/dev/./urandom",
-  "-Dspring.threads.virtual.enabled=true",
   "org.springframework.boot.loader.launch.JarLauncher"]
