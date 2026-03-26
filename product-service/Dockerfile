@@ -1,20 +1,31 @@
-# ── Stage 1: Extract Spring Boot layers ──────────────────────────
-# WHY? Spring Boot fat JARs contain: dependencies, spring-boot-loader,
-# snapshot-dependencies, and application code. By extracting layers,
-# Docker caches the slow-changing layers (deps) separately from the
-# fast-changing ones (your code). On re-runs, only changed layers
-# are re-extracted → startup goes from 60s class-loading to ~5s.
+# syntax=docker/dockerfile:1.6
+
+# ─────────────────────────────────────────────────────────────
+# Stage 1: Extract Spring Boot layers (disk-efficient)
+# ─────────────────────────────────────────────────────────────
 FROM eclipse-temurin:21-jre-alpine AS builder
-WORKDIR /app
-COPY target/*.jar app.jar
-RUN java -Djarmode=layertools -jar app.jar extract
 
-# ── Stage 2: Runtime image ────────────────────────────────────────
+WORKDIR /app
+
+# Deterministic artifact (override per service if needed)
+ARG JAR_FILE=target/app.jar
+
+# Copy only the required JAR
+COPY ${JAR_FILE} app.jar
+
+# Extract layers and remove the JAR in the SAME layer
+# → avoids duplicate storage (key for macOS Docker VM)
+RUN java -Djarmode=layertools -jar app.jar extract \
+    && rm app.jar
+
+# ─────────────────────────────────────────────────────────────
+# Stage 2: Runtime image (lean + cache-friendly)
+# ─────────────────────────────────────────────────────────────
 FROM eclipse-temurin:21-jre-alpine
+
 WORKDIR /app
 
-# Copy layers in order of least → most frequently changed
-# Docker caches each COPY as a separate layer
+# Copy in cache-optimal order (least → most frequently changed)
 COPY --from=builder /app/dependencies/ ./
 COPY --from=builder /app/spring-boot-loader/ ./
 COPY --from=builder /app/snapshot-dependencies/ ./
@@ -22,16 +33,11 @@ COPY --from=builder /app/application/ ./
 
 EXPOSE 8080
 
-# WHY JVM flags BEFORE -cp?
-# With layered JARs we use the Spring Boot loader directly.
-# JVM flags must come before the main class, not after -jar.
-# -XX:+UseContainerSupport  → respect Docker memory limits
-# -XX:MaxRAMPercentage=75.0 → use 75% of container RAM for heap
-#                             (adapts automatically to whatever limit is set)
-# -Djava.security.egd      → faster SecureRandom (avoids /dev/random blocking)
-ENTRYPOINT ["java", \
-  "-XX:+UseContainerSupport", \
-  "-XX:MaxRAMPercentage=75.0", \
-  "-XX:+UseG1GC", \
-  "-Djava.security.egd=file:/dev/./urandom", \
+# Container-aware JVM tuning (balanced defaults)
+ENTRYPOINT ["java",
+  "-XX:+UseContainerSupport",
+  "-XX:MaxRAMPercentage=75.0",
+  "-XX:+UseG1GC",
+  "-XX:MaxGCPauseMillis=200",
+  "-Djava.security.egd=file:/dev/./urandom",
   "org.springframework.boot.loader.launch.JarLauncher"]
