@@ -22,6 +22,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Service
 @RequiredArgsConstructor
@@ -39,8 +40,9 @@ public class UserService {
     private static final String USER_CACHE_PREFIX = "user:";
     private static final String USER_REGISTERED_TOPIC = "user.registered";
     private static final Duration CACHE_TTL = Duration.ofHours(1);
+    private static final AtomicInteger retryCounter = new AtomicInteger(0);
 
-    public UserDto.AuthResponse register(UserDto.RegisterRequest request) {
+    public UserDto.AuthResponse register(UserDto.RegisterRequest request,String fault) {
         if (userRepository.existsByEmail(request.getEmail())) {
             throw new DuplicateResourceException("Email already registered: " + request.getEmail());
         }
@@ -66,7 +68,13 @@ public class UserService {
         cacheUser(user);
 
         // Publish Kafka event
-        publishUserRegisteredEvent(user);
+        publishUserRegisteredEvent(user,fault);
+
+        // 🔥 Fault injection point
+        if ("fail-after-kafka".equalsIgnoreCase(fault)) {
+            log.error("Simulating failure AFTER Kafka + Redis for user: {}", user.getEmail());
+            throw new RuntimeException("Simulated failure after Kafka publish");
+        }
 
         // Increment counter metric
         Counter.builder("users.registered")
@@ -152,7 +160,7 @@ public class UserService {
         redisTemplate.opsForValue().set(cacheKey, user, CACHE_TTL);
     }
 
-    private void publishUserRegisteredEvent(User user) {
+    private void publishUserRegisteredEvent(User user,String fault) {
         UserRegisteredEvent event = UserRegisteredEvent.builder()
                 .userId(user.getId())
                 .email(user.getEmail())
@@ -163,7 +171,28 @@ public class UserService {
                 .eventType("USER_REGISTERED")
                 .build();
 
-        kafkaTemplate.send(USER_REGISTERED_TOPIC, user.getId().toString(), event);
+        // 🔥 Fault injection
+        if ("kafka-down".equalsIgnoreCase(fault)) {
+            log.error("Simulating Kafka failure");
+            throw new RuntimeException("Simulated Kafka failure");
+        }
+        // 🔥 Transient Kafka failure simulation
+        if ("fail-once-then-success".equalsIgnoreCase(fault)) {
+            if (retryCounter.getAndIncrement() == 0) {
+                log.warn("Simulating transient Kafka failure");
+                throw new RuntimeException("Transient Kafka failure");
+            }
+        }
+
+        kafkaTemplate.send(USER_REGISTERED_TOPIC, user.getId().toString(), event)
+                .whenComplete((result, ex) -> {
+                    if (ex != null) {
+                        log.error("Kafka publish FAILED for user: {}", user.getId(), ex);
+                    } else {
+                        log.info("Kafka publish SUCCESS for user: {}", user.getId());
+                    }
+                });
+       // kafkaTemplate.send(USER_REGISTERED_TOPIC, user.getId().toString(), event);
         log.info("Published USER_REGISTERED event for user: {}", user.getId());
     }
 

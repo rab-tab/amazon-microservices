@@ -37,6 +37,11 @@ spring:
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      retries: 3
+      retry-backoff-ms: 1000
+      delivery-timeout-ms: 10000
+      request-timeout-ms: 3000
+      acks: all
   security:
     jwt:
       secret: amazon-super-secret-jwt-key-2024-minimum-256-bits-required

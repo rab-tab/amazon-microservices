@@ -22,9 +22,10 @@ public class UserController {
     // ─── Auth Endpoints ────────────────────────────────────────────
     @PostMapping("/api/v1/auth/register")
     @Timed(value = "user.register", description = "Time taken to register a user")
-    public ResponseEntity<UserDto.AuthResponse> register(@Valid @RequestBody UserDto.RegisterRequest request) {
+    public ResponseEntity<UserDto.AuthResponse> register(@Valid @RequestBody UserDto.RegisterRequest request,
+                                                         @RequestHeader(value = "X-Fault", required = false) String fault) {
         log.info("Register request for email: {}", request.getEmail());
-        return ResponseEntity.status(HttpStatus.CREATED).body(userService.register(request));
+        return ResponseEntity.status(HttpStatus.CREATED).body(userService.register(request,fault));
     }
 
     @PostMapping("/api/v1/auth/login")
