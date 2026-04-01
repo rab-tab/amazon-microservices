@@ -117,6 +117,8 @@ spring:
             - Path=/api/v1/payments/**
           filters:
             - AuthenticationFilter
+    circuitbreaker:
+      enabled: true
   data:
     redis:
       host: redis
