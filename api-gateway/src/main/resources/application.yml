@@ -101,15 +101,9 @@ resilience4j:
         minimum-number-of-calls: 5
         sliding-window-type: COUNT_BASED
         register-health-indicator: true
-        # Which HTTP responses count as failures
-        # 4xx are client errors — don't penalise the service for them
-        # 5xx and timeouts are service failures — count those
-        record-exceptions:
-          - java.io.IOException
-          - java.util.concurrent.TimeoutException
-          - org.springframework.web.server.ResponseStatusException
-        ignore-exceptions:
-          - com.amazon.gateway.exception.AuthenticationException
+        # record-exceptions: not set here — Resilience4j records ALL exceptions
+        # by default. For Spring Cloud Gateway reactive CBs, connection failures
+        # and timeouts surface as java.io.IOException which is already covered.
 
       productService:
         failure-rate-threshold: 50
@@ -121,9 +115,7 @@ resilience4j:
         minimum-number-of-calls: 5
         sliding-window-type: COUNT_BASED
         register-health-indicator: true
-        record-exceptions:
-          - java.io.IOException
-          - java.util.concurrent.TimeoutException
+
 
       orderService:
         failure-rate-threshold: 50
@@ -135,9 +127,7 @@ resilience4j:
         minimum-number-of-calls: 5
         sliding-window-type: COUNT_BASED
         register-health-indicator: true
-        record-exceptions:
-          - java.io.IOException
-          - java.util.concurrent.TimeoutException
+
 
       paymentService:
         # Tighter threshold — payment failures are high-impact
@@ -151,9 +141,7 @@ resilience4j:
         minimum-number-of-calls: 5
         sliding-window-type: COUNT_BASED
         register-health-indicator: true
-        record-exceptions:
-          - java.io.IOException
-          - java.util.concurrent.TimeoutException
+
 
   # TimeLimiter is required for Spring Cloud Gateway CB integration —
   # it's what converts a slow reactive response into a timeout failure
