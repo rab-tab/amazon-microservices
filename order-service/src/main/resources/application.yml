@@ -46,7 +46,7 @@ spring:
 resilience4j:
   circuitbreaker:
     instances:
-      paymentService:
+      kafkaPaymentPublisher:
         # CLOSED → OPEN when 50%+ of last 10 calls fail
         failure-rate-threshold: 50
         slow-call-rate-threshold: 80
@@ -70,7 +70,7 @@ resilience4j:
         event-consumer-buffer-size: 20
   retry:
     instances:
-      paymentService:
+      kafkaPaymentPublisher:
         max-attempts: 3
         wait-duration: 500ms
         retry-exceptions:
@@ -88,7 +88,7 @@ resilience4j:
         register-health-indicator: true
   timelimiter:
     instances:
-      paymentService:
+      kafkaPaymentPublisher:
         timeout-duration: 5s
         cancel-running-future: true
 
@@ -172,7 +172,7 @@ spring:
 resilience4j:
   circuitbreaker:
     instances:
-      paymentService:
+      kafkaPaymentPublisher:
         # Trip after 2 out of 3 failures (66%)
         failure-rate-threshold: 50
         sliding-window-size: 3

@@ -31,7 +31,7 @@ public class ResilientKafkaPublisher {
     private final RetryRegistry retryRegistry;
     private final RateLimiterRegistry rateLimiterRegistry;
 
-    private static final String PAYMENT_REQUEST_CIRCUIT = "paymentService";
+    private static final String PAYMENT_REQUEST_CIRCUIT = "kafkaPaymentPublisher";
     private static final String ORDER_EVENT_CIRCUIT = "orderEventPublisher";
     private static final String ORDER_RATE_LIMITER = "orderCreation";
 
@@ -55,12 +55,12 @@ public class ResilientKafkaPublisher {
                 .withRetry(retry)
                 .withRateLimiter(rl)
                 .withFallback(
-                    exception -> {
-                        log.error("Payment request failed after resilience4j protection for order: {}. " +
-                                "Reason: {}", key, exception.getMessage());
-                        // Dead letter or compensating logic could go here
-                        return null;
-                    }
+                        exception -> {
+                            log.error("Payment request failed after resilience4j protection for order: {}. " +
+                                    "Reason: {}", key, exception.getMessage());
+                            // Dead letter or compensating logic could go here
+                            return null;
+                        }
                 )
                 .decorate();
 

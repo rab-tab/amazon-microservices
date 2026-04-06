@@ -84,97 +84,65 @@ public class ResilienceController {
     // ── Test-only endpoints (cb-test profile only) ───────────────────────────
 
     /**
-     * Simulate a real failure through the circuit breaker decorator.
+     * Simulate a real failure/success through the paymentService circuit breaker.
+     *
+     * WHY a dedicated path per CB, not ?name=cbName query param?
+     * There are exactly two CBs in order-service (paymentService,
+     * orderEventPublisher) and each wraps a specific call path in
+     * ResilientKafkaPublisher. Making the CB name a query param would let
+     * you pass any arbitrary string — a typo would silently create a new
+     * CB instance with default config instead of hitting the configured one.
+     * Path-per-CB is explicit, typo-safe, and matches the production code structure.
      *
      * WHY not transitionToOpenState()?
-     * transitionToOpenState() bypasses the CB entirely — it flips the state
-     * flag directly without recording any calls in the sliding window.
-     * This means:
-     *   - failureRate stays at -1.0 (not evaluated)
-     *   - numberOfFailedCalls stays at 0
-     *   - The transition back to HALF_OPEN / CLOSED is not driven by real metrics
-     *   - You're testing the state flag, not the circuit breaker behaviour
+     * That bypasses the sliding window entirely — failureRate stays -1.0,
+     * numberOfFailedCalls stays 0, HALF_OPEN transition is not timer-driven.
+     * You'd be testing the state flag, not the CB state machine.
+     * executeSupplier() goes through the full decorator chain, identical to
+     * how ResilientKafkaPublisher.publishPaymentRequest() works in production.
      *
-     * This endpoint decorates a supplier that always throws with the named
-     * circuit breaker, exactly as ResilientKafkaPublisher does in production.
-     * The CB records a genuine failure in its sliding window, so:
-     *   - After minimumNumberOfCalls failures >= failureRateThreshold%, CB → OPEN
-     *   - After waitDurationInOpenState, CB → HALF_OPEN automatically
-     *   - After permittedNumberOfCallsInHalfOpenState successes, CB → CLOSED
-     *
-     * Only active on cb-test profile — never exposed in production.
-     *
-     * @param name       circuit breaker name (paymentService, orderEventPublisher)
-     * @param shouldFail true = record a failure, false = record a success
+     * Only active on cb-test profile — never compiled into production.
      */
-    @PostMapping("/test/simulate-failure")
+    @PostMapping("/test/payment-cb/failure")
     @Profile("cb-test")
-    public ResponseEntity<Map<String, Object>> simulateFailure(
-            @RequestParam String name,
-            @RequestParam(defaultValue = "true") boolean shouldFail) {
+    public ResponseEntity<Map<String, Object>> simulatePaymentCbFailure() {
+        return recordCbCall("kafkaPaymentPublisher", false);
+    }
 
-        try {
-            CircuitBreaker cb = circuitBreakerRegistry.circuitBreaker(name);
-            String callOutcome;
+    @PostMapping("/test/payment-cb/success")
+    @Profile("cb-test")
+    public ResponseEntity<Map<String, Object>> simulatePaymentCbSuccess() {
+        return recordCbCall("kafkaPaymentPublisher", true);
+    }
 
-            if (shouldFail) {
-                // Execute a call through the CB that throws — CB records a FAILURE
-                // The fallback catches the exception so we can return a 200 with
-                // the CB state rather than propagating a 500.
-                try {
-                    cb.executeSupplier(() -> {
-                        throw new RuntimeException("Simulated failure for CB test");
-                    });
-                    callOutcome = "success"; // shouldn't reach here
-                } catch (Exception e) {
-                    // CB recorded the failure — this is expected
-                    callOutcome = "failure-recorded";
-                    log.debug("[CB-TEST] {} recorded failure. State now: {}", name, cb.getState());
-                }
-            } else {
-                // Execute a call through the CB that succeeds — CB records a SUCCESS
-                // Used to drive HALF_OPEN → CLOSED transition
-                cb.executeSupplier(() -> "ok");
-                callOutcome = "success-recorded";
-                log.debug("[CB-TEST] {} recorded success. State now: {}", name, cb.getState());
-            }
+    @PostMapping("/test/order-event-cb/failure")
+    @Profile("cb-test")
+    public ResponseEntity<Map<String, Object>> simulateOrderEventCbFailure() {
+        return recordCbCall("orderEventPublisher", false);
+    }
 
-            Map<String, Object> info = buildCbInfo(cb);
-            info.put("name", name);
-            info.put("callOutcome", callOutcome);
-            return ResponseEntity.ok(info);
-
-        } catch (io.github.resilience4j.circuitbreaker.CallNotPermittedException e) {
-            // CB is OPEN — call was rejected before execution
-            CircuitBreaker cb = circuitBreakerRegistry.circuitBreaker(name);
-            Map<String, Object> info = buildCbInfo(cb);
-            info.put("name", name);
-            info.put("callOutcome", "rejected-circuit-open");
-            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(info);
-
-        } catch (Exception e) {
-            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
-        }
+    @PostMapping("/test/order-event-cb/success")
+    @Profile("cb-test")
+    public ResponseEntity<Map<String, Object>> simulateOrderEventCbSuccess() {
+        return recordCbCall("orderEventPublisher", true);
     }
 
     /**
-     * Simulate rate limiter exhaustion.
-     * Fires N calls through the orderCreation rate limiter in quick succession.
-     * Once the limit is exhausted, calls return 429.
+     * Exhaust the orderCreation rate limiter.
+     * Acquires N permits in one call — any beyond the limit are rejected.
+     * Only active on cb-test profile.
      */
-    @PostMapping("/test/simulate-rate-limit")
+    @PostMapping("/test/rate-limit/exhaust")
     @Profile("cb-test")
-    public ResponseEntity<Map<String, Object>> simulateRateLimit(
+    public ResponseEntity<Map<String, Object>> exhaustRateLimit(
             @RequestParam(defaultValue = "1") int calls) {
 
         int permitted = 0;
-        int rejected = 0;
-
+        int rejected  = 0;
         RateLimiter rl = rateLimiterRegistry.rateLimiter("orderCreation");
 
         for (int i = 0; i < calls; i++) {
-            boolean acquired = rl.acquirePermission();
-            if (acquired) permitted++;
+            if (rl.acquirePermission()) permitted++;
             else rejected++;
         }
 
@@ -185,6 +153,44 @@ public class ResilienceController {
                 "availablePermissions", rl.getMetrics().getAvailablePermissions(),
                 "waitingThreads", rl.getMetrics().getNumberOfWaitingThreads()
         ));
+    }
+
+    // ── Internal helper — shared by all simulate endpoints ───────────────────
+
+    private ResponseEntity<Map<String, Object>> recordCbCall(String cbName, boolean shouldSucceed) {
+        try {
+            CircuitBreaker cb = circuitBreakerRegistry.circuitBreaker(cbName);
+            String outcome;
+
+            if (shouldSucceed) {
+                cb.executeSupplier(() -> "ok");
+                outcome = "success-recorded";
+            } else {
+                try {
+                    cb.executeSupplier(() -> {
+                        throw new RuntimeException("Simulated failure for CB test");
+                    });
+                    outcome = "success"; // unreachable
+                } catch (Exception e) {
+                    outcome = "failure-recorded";
+                }
+            }
+            log.debug("[CB-TEST] {} {} — state now: {}", cbName, outcome, cb.getState());
+
+            Map<String, Object> info = buildCbInfo(cb);
+            info.put("name", cbName);
+            info.put("callOutcome", outcome);
+            return ResponseEntity.ok(info);
+
+        } catch (io.github.resilience4j.circuitbreaker.CallNotPermittedException e) {
+            CircuitBreaker cb = circuitBreakerRegistry.circuitBreaker(cbName);
+            Map<String, Object> info = buildCbInfo(cb);
+            info.put("name", cbName);
+            info.put("callOutcome", "rejected-circuit-open");
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(info);
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
