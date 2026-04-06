@@ -38,34 +38,44 @@ spring:
   cache:
     type: redis
 
+# ── Resilience4j (production thresholds) ──────────────────────────────────────
+# WHY configure here not in Java code?
+# Spring Boot auto-configures the registries from these properties.
+# Any @Bean CircuitBreakerRegistry in Java code causes Spring Boot to BACK OFF
+# and these properties are completely ignored. Keep config in YAML only.
 resilience4j:
   circuitbreaker:
     instances:
       paymentService:
+        # CLOSED → OPEN when 50%+ of last 10 calls fail
         failure-rate-threshold: 50
         slow-call-rate-threshold: 80
         slow-call-duration-threshold: 3s
+        # Stay OPEN for 30s then try HALF_OPEN
         wait-duration-in-open-state: 30s
+        # Allow 5 test calls in HALF_OPEN before deciding
         permitted-number-of-calls-in-half-open-state: 5
         sliding-window-size: 10
         minimum-number-of-calls: 5
+        sliding-window-type: COUNT_BASED
         register-health-indicator: true
-        event-consumer-buffer-size: 10
+        event-consumer-buffer-size: 20
       orderEventPublisher:
         failure-rate-threshold: 60
         wait-duration-in-open-state: 20s
         sliding-window-size: 8
+        minimum-number-of-calls: 4
+        sliding-window-type: COUNT_BASED
         register-health-indicator: true
-      productService:
-        failure-rate-threshold: 50
-        wait-duration-in-open-state: 30s
-        sliding-window-size: 10
-        register-health-indicator: true
+        event-consumer-buffer-size: 20
   retry:
     instances:
       paymentService:
         max-attempts: 3
         wait-duration: 500ms
+        retry-exceptions:
+          - java.io.IOException
+          - java.util.concurrent.TimeoutException
       orderEventPublisher:
         max-attempts: 3
         wait-duration: 300ms
@@ -111,7 +121,8 @@ logging:
     io.github.resilience4j: DEBUG
 
 ---
-# ── CI / local-test profile ──────────────────────────────────────
+# ── CI / local-test profile ──────────────────────────────────────────────────
+# Activated when SPRING_PROFILES_ACTIVE=local-test (set in docker-compose)
 spring:
   config:
     activate:
@@ -121,6 +132,72 @@ spring:
       ddl-auto: create-drop
   cache:
     type: none
+
+management:
+  tracing:
+    sampling:
+      probability: 0.0
+
+---
+# ── Test profile — fast circuit breaker transitions ──────────────────────────
+# Activated when SPRING_PROFILES_ACTIVE=local-test,cb-test  (or just cb-test)
+#
+# WHY this profile exists:
+# Production thresholds (window=10, minimum=5, waitDuration=30s) make it
+# impossible to test real CB state transitions in an integration test:
+#   - You'd need 5+ real Kafka failures to even start evaluating
+#   - Then wait 30s in OPEN state before HALF_OPEN
+#   - Then send 5 probe calls in HALF_OPEN before CLOSED
+#   - Total: 10+ API calls and 30+ seconds per test scenario
+#
+# With cb-test thresholds:
+#   - 3 failures in a window of 3 → OPEN immediately
+#   - Wait only 2s in OPEN → HALF_OPEN
+#   - 2 probe calls in HALF_OPEN → back to CLOSED or OPEN
+#   - Total: 3-5 API calls and ~3 seconds per scenario
+#
+# The /api/v1/resilience/test/simulate-failure endpoint (only active in this
+# profile) executes a real decorated call that throws, so the CB records
+# genuine failures — not transitionToOpenState() which bypasses CB logic.
+spring:
+  config:
+    activate:
+      on-profile: cb-test
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+  cache:
+    type: none
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      paymentService:
+        # Trip after 2 out of 3 failures (66%)
+        failure-rate-threshold: 50
+        sliding-window-size: 3
+        minimum-number-of-calls: 3
+        # Only 2s in OPEN before trying HALF_OPEN — lets tests run fast
+        wait-duration-in-open-state: 2s
+        # 2 probe calls in HALF_OPEN to decide
+        permitted-number-of-calls-in-half-open-state: 2
+        sliding-window-type: COUNT_BASED
+        register-health-indicator: true
+      orderEventPublisher:
+        failure-rate-threshold: 50
+        sliding-window-size: 3
+        minimum-number-of-calls: 3
+        wait-duration-in-open-state: 2s
+        permitted-number-of-calls-in-half-open-state: 2
+        sliding-window-type: COUNT_BASED
+        register-health-indicator: true
+  ratelimiter:
+    instances:
+      orderCreation:
+        # Low limit so rate limiter tests can trip it with few requests
+        limit-for-period: 5
+        limit-refresh-period: 10s
+        timeout-duration: 100ms
 
 management:
   tracing:

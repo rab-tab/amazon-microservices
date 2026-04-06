@@ -67,17 +67,120 @@ spring:
       secret: amazon-super-secret-jwt-key-2024-minimum-256-bits-required
       expiration: 86400000
 
+# ── Gateway-level Circuit Breakers ────────────────────────────────────────────
+# These protect HTTP routes between the gateway and each downstream service.
+#
+# WHAT they protect against:
+#   - Downstream service completely down (connection refused)
+#   - HTTP 5xx responses from a service
+#   - Response timeouts (slow-call-duration-threshold)
+# WHAT they do when tripped:
+#   - Return the fallbackUri response immediately (no hanging requests)
+#   - Prevent thundering-herd against a recovering service
+#
+# HOW they differ from order-service's Resilience4j CBs:
+#   - Gateway CBs = HTTP layer, protect the client from dead services
+#   - Order-service CBs = Kafka layer, protect internal publish calls
+#   - Both are needed — they guard different failure modes
+#
+# WHY spring-cloud-starter-circuitbreaker-resilience4j in pom.xml?
+#   Spring Cloud Gateway's CircuitBreaker filter is a thin wrapper that
+#   delegates to whatever CB implementation is on the classpath.
+#   Without that dependency, these config blocks are ignored at startup.
+resilience4j:
+  circuitbreaker:
+    instances:
+      userService:
+        # Trip OPEN after 50% of last 10 HTTP calls to user-service fail
+        failure-rate-threshold: 50
+        slow-call-rate-threshold: 80
+        slow-call-duration-threshold: 2s     # user-service should respond in <2s
+        wait-duration-in-open-state: 30s     # wait 30s before probing again
+        permitted-number-of-calls-in-half-open-state: 3
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        sliding-window-type: COUNT_BASED
+        register-health-indicator: true
+        # Which HTTP responses count as failures
+        # 4xx are client errors — don't penalise the service for them
+        # 5xx and timeouts are service failures — count those
+        record-exceptions:
+          - java.io.IOException
+          - java.util.concurrent.TimeoutException
+          - org.springframework.web.server.ResponseStatusException
+        ignore-exceptions:
+          - com.amazon.gateway.exception.AuthenticationException
+
+      productService:
+        failure-rate-threshold: 50
+        slow-call-rate-threshold: 80
+        slow-call-duration-threshold: 3s     # product queries can be heavier
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        sliding-window-type: COUNT_BASED
+        register-health-indicator: true
+        record-exceptions:
+          - java.io.IOException
+          - java.util.concurrent.TimeoutException
+
+      orderService:
+        failure-rate-threshold: 50
+        slow-call-rate-threshold: 80
+        slow-call-duration-threshold: 5s     # orders involve DB + Kafka — allow more time
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        sliding-window-type: COUNT_BASED
+        register-health-indicator: true
+        record-exceptions:
+          - java.io.IOException
+          - java.util.concurrent.TimeoutException
+
+      paymentService:
+        # Tighter threshold — payment failures are high-impact
+        failure-rate-threshold: 40
+        slow-call-rate-threshold: 70
+        slow-call-duration-threshold: 4s
+        # Longer wait — payment service recovering needs time
+        wait-duration-in-open-state: 60s
+        permitted-number-of-calls-in-half-open-state: 2
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        sliding-window-type: COUNT_BASED
+        register-health-indicator: true
+        record-exceptions:
+          - java.io.IOException
+          - java.util.concurrent.TimeoutException
+
+  # TimeLimiter is required for Spring Cloud Gateway CB integration —
+  # it's what converts a slow reactive response into a timeout failure
+  # that the CB can record. Without it, slow calls never register as failures.
+  timelimiter:
+    instances:
+      userService:
+        timeout-duration: 3s
+        cancel-running-future: true
+      productService:
+        timeout-duration: 4s
+        cancel-running-future: true
+      orderService:
+        timeout-duration: 6s
+        cancel-running-future: true
+      paymentService:
+        timeout-duration: 5s
+        cancel-running-future: true
+
 management:
   endpoints:
     web:
       exposure:
-        include: health,info,prometheus,metrics,gateway
-  endpoint:
-    health:
-      show-details: always
-  # Permit actuator endpoints without auth (gateway uses servlet+reactive security)
-  security:
-    enabled: false
+        include: health,info,prometheus,metrics,gateway,circuitbreakers
+  health:
+    circuitbreakers:
+      enabled: true
   metrics:
     export:
       prometheus:
@@ -90,6 +193,11 @@ management:
       endpoint: http://localhost:9411/api/v2/spans
 
 ---
+# ── Docker / CI profile ───────────────────────────────────────────────────────
+# WHY were CB filters missing from the docker profile previously?
+# The docker profile only overrode the route URIs (localhost → container names)
+# but redeclared the routes WITHOUT the CircuitBreaker filters, so CI ran with
+# zero gateway CB protection. Fixed here by restoring filters in all routes.
 spring:
   config:
     activate:
@@ -101,29 +209,70 @@ spring:
           uri: http://user-service:8081
           predicates:
             - Path=/api/v1/users/**, /api/v1/auth/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: userService
+                fallbackUri: forward:/fallback/user
+
         - id: product-service
           uri: http://product-service:8082
           predicates:
             - Path=/api/v1/products/**, /api/v1/categories/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: productService
+                fallbackUri: forward:/fallback/product
+
         - id: order-service
           uri: http://order-service:8083
           predicates:
             - Path=/api/v1/orders/**
           filters:
             - AuthenticationFilter
+            - name: CircuitBreaker
+              args:
+                name: orderService
+                fallbackUri: forward:/fallback/order
+
         - id: payment-service
           uri: http://payment-service:8084
           predicates:
             - Path=/api/v1/payments/**
           filters:
             - AuthenticationFilter
-    circuitbreaker:
-      enabled: true
+            - name: CircuitBreaker
+              args:
+                name: paymentService
+                fallbackUri: forward:/fallback/payment
+
   data:
     redis:
       host: redis
       port: 6379
       password: redis123
+
   zipkin:
     tracing:
       endpoint: http://zipkin:9411/api/v2/spans
+
+management:
+  tracing:
+    sampling:
+      probability: 0.0
+
+---
+# ── local-test profile (CI) ───────────────────────────────────────────────────
+spring:
+  config:
+    activate:
+      on-profile: local-test
+  data:
+    redis:
+      host: redis
+
+management:
+  tracing:
+    sampling:
+      probability: 0.0

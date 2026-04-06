@@ -1,5 +1,6 @@
 package com.amazon.user.config;
 
+import com.amazon.user.dto.UserDto;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -53,6 +54,24 @@ public class AppConfig {
         template.setValueSerializer(new Jackson2JsonRedisSerializer<>(objectMapper(), Object.class));
         template.setHashKeySerializer(new StringRedisSerializer());
         template.setHashValueSerializer(new Jackson2JsonRedisSerializer<>(objectMapper(), Object.class));
+        return template;
+    }
+
+    @Bean
+    public RedisTemplate<String, UserDto.UserResponse> userResponseRedisTemplate(RedisConnectionFactory factory) {
+        RedisTemplate<String, UserDto.UserResponse> template = new RedisTemplate<>();
+        template.setConnectionFactory(factory);
+
+        Jackson2JsonRedisSerializer<UserDto.UserResponse> serializer =
+                new Jackson2JsonRedisSerializer<>(UserDto.UserResponse.class);
+        serializer.setObjectMapper(objectMapper()); // reuse existing ObjectMapper bean
+
+        template.setKeySerializer(new StringRedisSerializer());
+        template.setValueSerializer(serializer);
+        template.setHashKeySerializer(new StringRedisSerializer());
+        template.setHashValueSerializer(serializer);
+        template.afterPropertiesSet();
+
         return template;
     }
 

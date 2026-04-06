@@ -1,78 +1,29 @@
 package com.amazon.order.config;
 
-import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
-import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
-import io.github.resilience4j.ratelimiter.RateLimiterConfig;
-import io.github.resilience4j.ratelimiter.RateLimiterRegistry;
-import io.github.resilience4j.retry.RetryConfig;
-import io.github.resilience4j.retry.RetryRegistry;
-import io.github.resilience4j.timelimiter.TimeLimiterConfig;
-import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-import java.time.Duration;
-
+/**
+ * Resilience4j is configured entirely via application.yml.
+ *
+ * WHY no @Bean registry here?
+ * When you define a CircuitBreakerRegistry @Bean manually, Spring Boot's
+ * auto-configuration backs off and the YAML resilience4j.* properties are
+ * IGNORED. The manually created registry uses its own default thresholds,
+ * making the YAML config dead code.
+ *
+ * Removing the beans lets Spring Boot auto-configure the registries from
+ * application.yml, so:
+ *   - resilience4j.circuitbreaker.instances.paymentService.*  is applied
+ *   - resilience4j.ratelimiter.instances.orderCreation.*      is applied
+ *   - resilience4j.retry.instances.paymentService.*           is applied
+ *   - The test profile can override thresholds for fast CB transitions
+ *
+ * Spring Boot auto-configures:
+ *   CircuitBreakerRegistry, RetryRegistry, RateLimiterRegistry, TimeLimiterRegistry
+ * via spring-cloud-starter-circuitbreaker-resilience4j on the classpath.
+ * No @Bean declarations needed.
+ */
 @Configuration
 public class Resilience4jConfig {
-
-    // ─── Circuit Breaker ────────────────────────────────────────────────
-    // Protects the order service from cascading failures if payment/product
-    // services become unavailable.
-    @Bean
-    public CircuitBreakerRegistry circuitBreakerRegistry() {
-        CircuitBreakerConfig config = CircuitBreakerConfig.custom()
-                .failureRateThreshold(50)                    // Open after 50% failure rate
-                .slowCallRateThreshold(80)                   // Open after 80% slow calls
-                .slowCallDurationThreshold(Duration.ofSeconds(3)) // "slow" = >3s
-                .waitDurationInOpenState(Duration.ofSeconds(30))  // Stay open 30s before half-open
-                .permittedNumberOfCallsInHalfOpenState(5)    // Test with 5 calls in half-open
-                .slidingWindowSize(10)                       // Evaluate last 10 calls
-                .minimumNumberOfCalls(5)                     // Need at least 5 calls to evaluate
-                .recordExceptions(
-                    Exception.class
-                )
-                .build();
-
-        return CircuitBreakerRegistry.of(config);
-    }
-
-    // ─── Retry ─────────────────────────────────────────────────────────
-    // Automatically retries transient failures (e.g. Kafka publish blip)
-    @Bean
-    public RetryRegistry retryRegistry() {
-        RetryConfig config = RetryConfig.custom()
-                .maxAttempts(3)
-                .waitDuration(Duration.ofMillis(500))
-                .retryExceptions(
-                    java.io.IOException.class,
-                    java.util.concurrent.TimeoutException.class
-                )
-                .ignoreExceptions(
-                    IllegalArgumentException.class
-                )
-                .build();
-
-        return RetryRegistry.of(config);
-    }
-
-    // ─── Rate Limiter ───────────────────────────────────────────────────
-    // Limits order creation to prevent abuse (100 req/sec per instance)
-    @Bean
-    public RateLimiterRegistry rateLimiterRegistry() {
-        RateLimiterConfig config = RateLimiterConfig.custom()
-                .limitRefreshPeriod(Duration.ofSeconds(1))
-                .limitForPeriod(100)
-                .timeoutDuration(Duration.ofMillis(500))
-                .build();
-
-        return RateLimiterRegistry.of(config);
-    }
-
-    // ─── Time Limiter ───────────────────────────────────────────────────
-    @Bean
-    public TimeLimiterConfig timeLimiterConfig() {
-        return TimeLimiterConfig.custom()
-                .timeoutDuration(Duration.ofSeconds(5))
-                .build();
-    }
+    // intentionally empty — all config lives in application.yml
 }

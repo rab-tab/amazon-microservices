@@ -71,4 +71,9 @@ public class UserController {
     public ResponseEntity<String> health() {
         return ResponseEntity.ok("User Service is running");
     }
+
+    @GetMapping("/api/v1/test/secure")
+    public String secure() {
+        return "SECURED";
+    }
 }

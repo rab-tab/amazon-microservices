@@ -5,7 +5,7 @@ spring:
   application:
     name: user-service
   datasource:
-    url: jdbc:postgresql://localhost:5432/users_db
+    url: jdbc:postgresql://localhost:5432/users_db?currentSchema=user_service
     username: amazon
     password: amazon123
     driver-class-name: org.postgresql.Driver
@@ -15,7 +15,7 @@ spring:
       connection-timeout: 20000
   jpa:
     hibernate:
-      ddl-auto: update
+      ddl-auto: create
     show-sql: false
     properties:
       hibernate:

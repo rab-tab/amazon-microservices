@@ -18,13 +18,24 @@
 
     <properties>
         <java.version>21</java.version>
-        <spring-cloud.version>2023.0.3</spring-cloud.version>
+        <spring-cloud.version>2023.0.0</spring-cloud.version>
     </properties>
 
     <dependencies>
         <dependency>
             <groupId>org.springframework.cloud</groupId>
             <artifactId>spring-cloud-starter-gateway</artifactId>
+        </dependency>
+        <!-- WHY this dependency?
+             Spring Cloud Gateway's CircuitBreaker filter is a thin wrapper —
+             it needs a concrete CB implementation on the classpath to function.
+             Without this, the 'name: CircuitBreaker' route filters declared
+             in application.yml are silently ignored or throw at startup.
+             spring-cloud-starter-circuitbreaker-resilience4j brings in
+             resilience4j-reactor which is required for reactive (WebFlux) CBs. -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-circuitbreaker-resilience4j</artifactId>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -54,32 +65,21 @@
             <groupId>io.jsonwebtoken</groupId>
             <artifactId>jjwt-api</artifactId>
             <version>0.12.3</version>
-            <scope>compile</scope>
         </dependency>
         <dependency>
             <groupId>io.jsonwebtoken</groupId>
             <artifactId>jjwt-impl</artifactId>
             <version>0.12.3</version>
-            <scope>runtime</scope>
         </dependency>
         <dependency>
             <groupId>io.jsonwebtoken</groupId>
             <artifactId>jjwt-jackson</artifactId>
             <version>0.12.3</version>
-            <scope>runtime</scope>
         </dependency>
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
             <optional>true</optional>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.cloud</groupId>
-            <artifactId>spring-cloud-starter-circuitbreaker-reactor-resilience4j</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.cloud</groupId>
-            <artifactId>spring-cloud-starter-loadbalancer</artifactId>
         </dependency>
     </dependencies>
 
