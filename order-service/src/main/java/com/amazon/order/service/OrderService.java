@@ -4,10 +4,12 @@ import com.amazon.order.dto.OrderDto;
 import com.amazon.order.entity.Order;
 import com.amazon.order.entity.OrderItem;
 import com.amazon.order.event.OrderEvent;
+import com.amazon.order.exception.KafkaPublishException;
 import com.amazon.order.exception.OrderNotFoundException;
 import com.amazon.order.exception.OrderStateException;
 import com.amazon.order.repository.OrderRepository;
 import io.micrometer.core.instrument.MeterRegistry;
+import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
@@ -32,12 +34,17 @@ public class OrderService {
     private final OrderRepository orderRepository;
     private final KafkaTemplate<String, Object> kafkaTemplate;
     private final MeterRegistry meterRegistry;
+    private final HttpServletRequest httpServletRequest;
 
     private static final String ORDER_EVENTS_TOPIC = "order.events";
     private static final String PAYMENT_REQUEST_TOPIC = "payment.request";
 
+    /**
+     * Create a new order and publish events to Kafka
+     * Supports fault injection via X-Fault header for testing
+     */
     public OrderDto.OrderResponse createOrder(OrderDto.CreateOrderRequest request, UUID userId) {
-        // Build order items
+        // 1. Build order items
         List<OrderItem> items = request.getItems().stream()
                 .map(itemReq -> OrderItem.builder()
                         .productId(itemReq.getProductId())
@@ -48,10 +55,12 @@ public class OrderService {
                         .build())
                 .toList();
 
+        // 2. Calculate total amount
         BigDecimal totalAmount = items.stream()
                 .map(OrderItem::getTotalPrice)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
+        // 3. Build order entity
         Order order = Order.builder()
                 .userId(userId)
                 .items(items)
@@ -61,18 +70,120 @@ public class OrderService {
                 .status(Order.OrderStatus.PENDING)
                 .build();
 
+        // 4. Save order to database
         order = orderRepository.save(order);
         log.info("Order created: {} for user: {}", order.getId(), userId);
 
-        // Publish order created event (triggers payment saga)
-        publishOrderEvent("ORDER_CREATED", order);
+        // ═══════════════════════════════════════════════════════════════════════
+        // 5. FAULT INJECTION - Simulate Kafka failures for testing
+        // ═══════════════════════════════════════════════════════════════════════
+        String faultHeader = httpServletRequest.getHeader("X-Fault");
 
-        // Also publish payment request
-        publishPaymentRequest(order);
+        if (faultHeader != null && !faultHeader.isEmpty()) {
+            simulateKafkaFailure(faultHeader, order);
+            // If no exception thrown above, continue to normal flow
+        }
 
+        // ═══════════════════════════════════════════════════════════════════════
+        // 6. PUBLISH EVENTS TO KAFKA (normal flow)
+        // ═══════════════════════════════════════════════════════════════════════
+        try {
+            // Publish order created event (triggers payment saga)
+            publishOrderEvent("ORDER_CREATED", order);
+
+            // Publish payment request
+            publishPaymentRequest(order);
+
+            log.info("✅ Events published successfully for order: {}", order.getId());
+            meterRegistry.counter("orders.events_published").increment();
+
+        } catch (Exception e) {
+            // Real Kafka failure (not fault injection)
+            log.error("❌ Failed to publish events for order: {}", order.getId(), e);
+            meterRegistry.counter("orders.kafka_publish_failed").increment();
+
+            // Throw exception to trigger transaction rollback
+            throw new KafkaPublishException("Failed to publish order events", e);
+        }
+
+        // 7. Update metrics
         meterRegistry.counter("orders.created").increment();
 
+        // 8. Return response
         return mapToResponse(order);
+    }
+
+    /**
+     * Simulate different Kafka failure scenarios based on X-Fault header value
+     *
+     * Supported fault types:
+     * - kafka-down: Complete broker unavailability
+     * - kafka-timeout: Producer timeout waiting for broker response
+     * - kafka-retry-failure: Producer retry exhaustion
+     * - kafka-ack-failure: Insufficient in-sync replicas (ISR)
+     * - serialization-error: Message serialization failure
+     * - message-too-large: Message exceeds max.message.bytes
+     * - buffer-full: Producer buffer overflow
+     */
+    private void simulateKafkaFailure(String faultType, Order order) {
+        log.error("🔥 FAULT INJECTION: Type='{}' for order: {}", faultType, order.getId());
+
+        // Track simulated failures by type
+        meterRegistry.counter("orders.kafka_failure_simulated", "type", faultType).increment();
+
+        switch (faultType) {
+            case "kafka-down":
+                // Test 10a: Complete Kafka broker unavailability
+                throw new KafkaPublishException(
+                        "Simulated Kafka failure - broker unreachable for order: " + order.getId()
+                );
+
+            case "kafka-timeout":
+                // Test 10b: Producer timeout waiting for broker
+                try {
+                    log.warn("Simulating producer timeout delay...");
+                    Thread.sleep(100); // Simulate network delay
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                throw new KafkaPublishException(
+                        "Simulated Kafka timeout - producer timed out for order: " + order.getId()
+                );
+
+            case "kafka-retry-failure":
+                // Test 10c: Producer retry exhaustion
+                throw new KafkaPublishException(
+                        "Simulated retry failure - max retries exceeded for order: " + order.getId()
+                );
+
+            case "kafka-ack-failure":
+                // Test 10d: Acknowledgment failure (min.insync.replicas not met)
+                throw new KafkaPublishException(
+                        "Simulated ack failure - insufficient in-sync replicas for order: " + order.getId()
+                );
+
+            case "serialization-error":
+                // Test 10e: Message serialization failure
+                throw new KafkaPublishException(
+                        "Simulated serialization error - cannot serialize event for order: " + order.getId()
+                );
+
+            case "message-too-large":
+                // Test 10f: Message size exceeding broker limit
+                throw new KafkaPublishException(
+                        "Simulated message too large - event exceeds max.message.bytes for order: " + order.getId()
+                );
+
+            case "buffer-full":
+                // Producer buffer overflow
+                throw new KafkaPublishException(
+                        "Simulated buffer full - producer buffer overflow for order: " + order.getId()
+                );
+
+            default:
+                log.warn("⚠️  Unknown fault injection type: '{}' - ignoring", faultType);
+                // Don't throw exception for unknown fault types
+        }
     }
 
     @Transactional(readOnly = true)
@@ -103,7 +214,7 @@ public class OrderService {
         }
 
         if (order.getStatus() != Order.OrderStatus.PENDING &&
-            order.getStatus() != Order.OrderStatus.CONFIRMED) {
+                order.getStatus() != Order.OrderStatus.CONFIRMED) {
             throw new OrderStateException("Order cannot be cancelled in status: " + order.getStatus());
         }
 
@@ -113,14 +224,24 @@ public class OrderService {
         return mapToResponse(order);
     }
 
-    // Kafka listener for payment results (Saga pattern)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // KAFKA LISTENER - Payment Result (Saga Pattern)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Handle payment result events from payment service
+     * Updates order status based on payment success/failure
+     */
     @KafkaListener(topics = "payment.result", groupId = "order-service")
     public void handlePaymentResult(Map<String, Object> event) {
         String orderId = (String) event.get("orderId");
         String paymentStatus = (String) event.get("status");
         String paymentId = (String) event.get("paymentId");
 
-        if (orderId == null) return;
+        if (orderId == null) {
+            log.warn("Received payment result with null orderId - ignoring");
+            return;
+        }
 
         orderRepository.findById(UUID.fromString(orderId)).ifPresent(order -> {
             if ("SUCCESS".equals(paymentStatus)) {
@@ -138,6 +259,14 @@ public class OrderService {
         });
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PRIVATE HELPER METHODS
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Publish order event to Kafka
+     * Event types: ORDER_CREATED, ORDER_CANCELLED, ORDER_STATUS_UPDATED
+     */
     private void publishOrderEvent(String eventType, Order order) {
         OrderEvent event = OrderEvent.builder()
                 .eventType(eventType)
@@ -155,9 +284,14 @@ public class OrderService {
                                 .build())
                         .toList())
                 .build();
+
         kafkaTemplate.send(ORDER_EVENTS_TOPIC, order.getId().toString(), event);
+        log.info("📤 Published {} event for order: {}", eventType, order.getId());
     }
 
+    /**
+     * Publish payment request to payment service
+     */
     private void publishPaymentRequest(Order order) {
         Map<String, Object> paymentRequest = Map.of(
                 "orderId", order.getId().toString(),
@@ -165,10 +299,14 @@ public class OrderService {
                 "amount", order.getTotalAmount(),
                 "currency", "USD"
         );
+
         kafkaTemplate.send(PAYMENT_REQUEST_TOPIC, order.getId().toString(), paymentRequest);
-        log.info("Payment request published for order: {}", order.getId());
+        log.info("💳 Payment request published for order: {}", order.getId());
     }
 
+    /**
+     * Map Order entity to OrderResponse DTO
+     */
     private OrderDto.OrderResponse mapToResponse(Order order) {
         List<OrderDto.OrderItemResponse> itemResponses = order.getItems().stream()
                 .map(item -> OrderDto.OrderItemResponse.builder()

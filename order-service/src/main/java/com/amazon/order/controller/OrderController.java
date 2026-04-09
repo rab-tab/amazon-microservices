@@ -17,6 +17,15 @@ public class OrderController {
 
     private final OrderService orderService;
 
+    // ✅ ADD THIS - Get current user's orders
+    @GetMapping
+    public ResponseEntity<OrderDto.PagedOrderResponse> getOrders(
+            @RequestHeader("X-User-Id") String userId,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "10") int size) {
+        return ResponseEntity.ok(orderService.getUserOrders(UUID.fromString(userId), page, size));
+    }
+
     @PostMapping
     public ResponseEntity<OrderDto.OrderResponse> createOrder(
             @Valid @RequestBody OrderDto.CreateOrderRequest request,
