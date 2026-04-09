@@ -16,6 +16,7 @@ spring:
   redis:
     host: localhost
     port: 6379
+   # password: redis123
     timeout: 2000ms
 
   cloud:
@@ -204,8 +205,8 @@ spring:
                 fallbackUri: forward:/fallback/order-service
             - name: RequestRateLimiter
               args:
-                redis-rate-limiter.replenishRate: 50
-                redis-rate-limiter.burstCapacity: 100
+                redis-rate-limiter.replenishRate: 5
+                redis-rate-limiter.burstCapacity: 10
                 redis-rate-limiter.requestedTokens: 1
                 key-resolver: "#{@userKeyResolver}"
 
