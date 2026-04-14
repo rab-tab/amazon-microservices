@@ -17,14 +17,15 @@ import java.util.Map;
  * This simulates the service being down without actually stopping it.
  *
  * How it works:
- *   1. Test calls POST /api/v1/test/circuit-breaker/fail
+ *   1. Test calls POST /api/test/circuit-breaker/fail  (or /api/v1/test/...)
  *   2. This filter starts returning 503 for ALL requests (except test control endpoints)
  *   3. Gateway's circuit breaker trips after N failures
- *   4. Test calls POST /api/v1/test/circuit-breaker/recover
+ *   4. Test calls POST /api/test/circuit-breaker/recover
  *   5. This filter stops intercepting - normal operation resumes
  *
  * Excluded paths (always allowed):
- *   - /api/v1/test/circuit-breaker/** (test control endpoints)
+ *   - /api/test/circuit-breaker/** (test control endpoints)
+ *   - /api/v1/test/circuit-breaker/** (test control endpoints - v1)
  *   - /actuator/** (monitoring endpoints)
  *
  * Thread-safe: uses volatile boolean in CircuitBreakerTestState
@@ -44,8 +45,9 @@ public class CircuitBreakerTestFilter implements Filter {
 
         String path = httpRequest.getRequestURI();
 
-        // Always allow test control endpoints and actuator
+        // ✅ FIXED: Allow both /api/v1/ and /api/ paths
         if (path.startsWith("/api/v1/test/circuit-breaker") ||
+                path.startsWith("/api/test/circuit-breaker") ||  // ✅ Added this
                 path.startsWith("/actuator")) {
             chain.doFilter(request, response);
             return;

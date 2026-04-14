@@ -27,6 +27,10 @@ public class Order {
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
+    @Column(name = "idempotency_key", unique = true, length = 256)
+    private String idempotencyKey;
+
+
     @Column(name = "user_id", nullable = false)
     private UUID userId;
 
@@ -52,6 +56,12 @@ public class Order {
     @Column(name = "tracking_number")
     private String trackingNumber;
 
+
+    // ✅ ADD THIS - Optimistic locking
+    @Version
+    @Column(name = "version")
+    private Long version;
+
     @Column(name = "notes")
     private String notes;
 
@@ -62,6 +72,17 @@ public class Order {
     @UpdateTimestamp
     @Column(name = "updated_at")
     private LocalDateTime updatedAt;
+
+    @PrePersist
+    protected void onCreate() {
+        createdAt = LocalDateTime.now();
+        updatedAt = LocalDateTime.now();
+    }
+
+    @PreUpdate
+    protected void onUpdate() {
+        updatedAt = LocalDateTime.now();
+    }
 
     public enum OrderStatus {
         PENDING, CONFIRMED, PAYMENT_PROCESSING, PAYMENT_FAILED,

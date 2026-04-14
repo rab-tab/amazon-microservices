@@ -4,6 +4,7 @@ import com.amazon.order.dto.OrderDto;
 import com.amazon.order.entity.Order;
 import com.amazon.order.entity.OrderItem;
 import com.amazon.order.event.OrderEvent;
+import com.amazon.order.exception.DuplicateOrderException;
 import com.amazon.order.exception.KafkaPublishException;
 import com.amazon.order.exception.OrderNotFoundException;
 import com.amazon.order.exception.OrderStateException;
@@ -12,6 +13,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.kafka.annotation.KafkaListener;
@@ -23,6 +25,7 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 @Service
@@ -42,9 +45,41 @@ public class OrderService {
     /**
      * Create a new order and publish events to Kafka
      * Supports fault injection via X-Fault header for testing
+     * Supports idempotency via idempotencyKey parameter
+     *
+     * @param request Order creation request
+     * @param userId User ID from gateway
+     * @param idempotencyKey Unique key for duplicate detection
+     * @return Order response
+     * @throws DuplicateOrderException if order with same idempotency key exists
      */
-    public OrderDto.OrderResponse createOrder(OrderDto.CreateOrderRequest request, UUID userId) {
-        // 1. Build order items
+    public OrderDto.OrderResponse createOrder(
+            OrderDto.CreateOrderRequest request,
+            UUID userId,
+            String idempotencyKey) {
+
+        log.info("Creating order for user: {} with idempotency key: {}", userId, idempotencyKey);
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // STEP 1: CHECK FOR DUPLICATE (Idempotency)
+        // ═══════════════════════════════════════════════════════════════════════
+        Optional<Order> existingOrder = orderRepository.findByIdempotencyKey(idempotencyKey);
+
+        if (existingOrder.isPresent()) {
+            log.info("🔄 Duplicate order detected for idempotency key: {}. Existing order: {}",
+                    idempotencyKey, existingOrder.get().getId());
+
+            meterRegistry.counter("orders.duplicate_detected").increment();
+
+            throw new DuplicateOrderException(
+                    "Order with this idempotency key already exists: " + idempotencyKey,
+                    existingOrder.get().getId()
+            );
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // STEP 2: BUILD ORDER ITEMS
+        // ═══════════════════════════════════════════════════════════════════════
         List<OrderItem> items = request.getItems().stream()
                 .map(itemReq -> OrderItem.builder()
                         .productId(itemReq.getProductId())
@@ -55,14 +90,19 @@ public class OrderService {
                         .build())
                 .toList();
 
-        // 2. Calculate total amount
+        // ═══════════════════════════════════════════════════════════════════════
+        // STEP 3: CALCULATE TOTAL AMOUNT
+        // ═══════════════════════════════════════════════════════════════════════
         BigDecimal totalAmount = items.stream()
                 .map(OrderItem::getTotalPrice)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-        // 3. Build order entity
+        // ═══════════════════════════════════════════════════════════════════════
+        // STEP 4: BUILD ORDER ENTITY (with idempotency key)
+        // ═══════════════════════════════════════════════════════════════════════
         Order order = Order.builder()
                 .userId(userId)
+                .idempotencyKey(idempotencyKey)  // ← NEW: Add idempotency key
                 .items(items)
                 .totalAmount(totalAmount)
                 .shippingAddress(request.getShippingAddress())
@@ -70,12 +110,34 @@ public class OrderService {
                 .status(Order.OrderStatus.PENDING)
                 .build();
 
-        // 4. Save order to database
-        order = orderRepository.save(order);
-        log.info("Order created: {} for user: {}", order.getId(), userId);
+        // ═══════════════════════════════════════════════════════════════════════
+        // STEP 5: SAVE ORDER TO DATABASE (with unique constraint protection)
+        // ═══════════════════════════════════════════════════════════════════════
+        try {
+            order = orderRepository.save(order);
+            log.info("✅ Order created: {} for user: {} with idempotency key: {}",
+                    order.getId(), userId, idempotencyKey);
+
+        } catch (DataIntegrityViolationException e) {
+            // Race condition: Another thread/instance created order with same idempotency key
+            log.warn("⚠️  Concurrent order creation detected for idempotency key: {}. " +
+                    "Database unique constraint prevented duplicate.", idempotencyKey);
+
+            meterRegistry.counter("orders.concurrent_duplicate_prevented").increment();
+
+            // Fetch the order that was created by the concurrent request
+            Order concurrentOrder = orderRepository.findByIdempotencyKey(idempotencyKey)
+                    .orElseThrow(() -> new IllegalStateException(
+                            "Concurrent insert race condition for idempotency key: " + idempotencyKey));
+
+            throw new DuplicateOrderException(
+                    "Order created by concurrent request",
+                    concurrentOrder.getId()
+            );
+        }
 
         // ═══════════════════════════════════════════════════════════════════════
-        // 5. FAULT INJECTION - Simulate Kafka failures for testing
+        // STEP 6: FAULT INJECTION - Simulate Kafka failures for testing
         // ═══════════════════════════════════════════════════════════════════════
         String faultHeader = httpServletRequest.getHeader("X-Fault");
 
@@ -85,7 +147,7 @@ public class OrderService {
         }
 
         // ═══════════════════════════════════════════════════════════════════════
-        // 6. PUBLISH EVENTS TO KAFKA (normal flow)
+        // STEP 7: PUBLISH EVENTS TO KAFKA (normal flow)
         // ═══════════════════════════════════════════════════════════════════════
         try {
             // Publish order created event (triggers payment saga)
@@ -103,13 +165,33 @@ public class OrderService {
             meterRegistry.counter("orders.kafka_publish_failed").increment();
 
             // Throw exception to trigger transaction rollback
+            // This will also rollback the order creation (database save)
             throw new KafkaPublishException("Failed to publish order events", e);
         }
 
-        // 7. Update metrics
+        // ═══════════════════════════════════════════════════════════════════════
+        // STEP 8: UPDATE METRICS & RETURN RESPONSE
+        // ═══════════════════════════════════════════════════════════════════════
         meterRegistry.counter("orders.created").increment();
+        return mapToResponse(order);
+    }
 
-        // 8. Return response
+    /**
+     * Get existing order by idempotency key
+     * Used when duplicate order request is detected
+     *
+     * @param idempotencyKey Idempotency key
+     * @return Order response
+     * @throws OrderNotFoundException if order not found
+     */
+    @Transactional(readOnly = true)
+    public OrderDto.OrderResponse getOrderByIdempotencyKey(String idempotencyKey) {
+        log.debug("Fetching order by idempotency key: {}", idempotencyKey);
+
+        Order order = orderRepository.findByIdempotencyKey(idempotencyKey)
+                .orElseThrow(() -> new OrderNotFoundException(
+                        "Order not found for idempotency key: " + idempotencyKey));
+
         return mapToResponse(order);
     }
 
