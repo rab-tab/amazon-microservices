@@ -73,6 +73,7 @@ public class OrderDto {
         private UUID userId;
         private List<OrderItemResponse> items;
         private BigDecimal totalAmount;
+        private String idempotencyKey;
         private Order.OrderStatus status;
         private String shippingAddress;
         private UUID paymentId;

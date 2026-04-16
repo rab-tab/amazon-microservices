@@ -25,13 +25,20 @@ spring:
     consumer:
       group-id: payment-service
       auto-offset-reset: earliest
+      enable-auto-commit: true
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
       properties:
         spring.json.trusted.packages: "*"
+        spring.json.type.mapping: "event:java.util.HashMap"  # ✅ Add this
+          # ✅ ADD TRACING INTERCEPTOR
+        interceptor.classes: io.opentelemetry.instrumentation.kafkaclients.v2_6.TracingConsumerInterceptor
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        # ✅ ADD TRACING INTERCEPTOR
+        interceptor.classes: io.opentelemetry.instrumentation.kafkaclients.v2_6.TracingProducerInterceptor
   cache:
     type: redis
 
@@ -69,3 +76,9 @@ management:
   tracing:
     sampling:
       probability: 0.0
+
+# ✅ Add logging to see errors
+logging:
+  level:
+    org.springframework.kafka: DEBUG
+    com.amazon.payment: DEBUG

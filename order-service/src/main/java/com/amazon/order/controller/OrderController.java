@@ -6,6 +6,7 @@ import com.amazon.order.service.OrderService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -89,6 +90,16 @@ public class OrderController {
 
             // Return 200 OK (not 201 Created) to indicate this is an existing order
             // Client can distinguish: 201 = new order created, 200 = duplicate detected
+            return ResponseEntity.ok(existingOrder);
+        }
+        catch (DataIntegrityViolationException e) {
+            // ✅ NEW: Caught by database constraint (race condition)
+            log.warn("Duplicate detected by database constraint (race condition): {}", idempotencyKey);
+
+            // Fetch the order that was created by the winning thread
+            OrderDto.OrderResponse existingOrder =
+                    orderService.getOrderByIdempotencyKey(idempotencyKey);
+
             return ResponseEntity.ok(existingOrder);
         }
     }

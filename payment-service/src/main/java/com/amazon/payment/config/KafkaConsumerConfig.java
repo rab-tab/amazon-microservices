@@ -1,5 +1,6 @@
 package com.amazon.payment.config;
 
+import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.StringDeserializer;
@@ -14,25 +15,17 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.listener.ContainerProperties;
 import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
 import org.springframework.kafka.listener.DefaultErrorHandler;
-import org.springframework.kafka.support.serializer.ErrorHandlingDeserializer;
-import org.springframework.kafka.support.serializer.JsonDeserializer;
-import org.springframework.util.backoff.ExponentialBackOff;
+import org.springframework.util.backoff.FixedBackOff;
 
 import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Kafka Consumer Configuration with Dead Letter Queue (DLQ) Support
- *
- * Features:
- * - ErrorHandlingDeserializer wraps JSON deserializer for graceful error handling
- * - DeadLetterPublishingRecoverer sends failed messages to DLQ topic
- * - Exponential backoff retry strategy (3 retries: 1s, 2s, 4s)
- * - DLQ topic naming: {original-topic}.DLQ
- * - Error metadata preserved in DLQ headers
+ * Kafka Consumer Configuration with DLQ Support
  */
 @EnableKafka
 @Configuration
+@Slf4j
 public class KafkaConsumerConfig {
 
     @Value("${spring.kafka.bootstrap-servers}")
@@ -42,105 +35,83 @@ public class KafkaConsumerConfig {
     private String groupId;
 
     /**
-     * Consumer Factory with ErrorHandlingDeserializer
-     *
-     * This configuration wraps the JSON deserializer with ErrorHandlingDeserializer
-     * to handle deserialization failures gracefully instead of crashing the consumer.
+     * Consumer Factory - Simple String deserializer
      */
     @Bean
-    public ConsumerFactory<String, Object> consumerFactory() {
+    public ConsumerFactory<String, String> consumerFactory() {
         Map<String, Object> config = new HashMap<>();
 
-        // Basic Kafka settings
+        // Basic settings
         config.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         config.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
 
-        // CRITICAL: Use ErrorHandlingDeserializer as the outer deserializer
-        config.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ErrorHandlingDeserializer.class);
-        config.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ErrorHandlingDeserializer.class);
-
-        // Specify the actual deserializers to delegate to
-        config.put(ErrorHandlingDeserializer.KEY_DESERIALIZER_CLASS, StringDeserializer.class);
-        config.put(ErrorHandlingDeserializer.VALUE_DESERIALIZER_CLASS, JsonDeserializer.class);
-
-        // JSON deserializer settings
-        config.put(JsonDeserializer.TRUSTED_PACKAGES, "*");
-        config.put(JsonDeserializer.USE_TYPE_INFO_HEADERS, false);
+        // Simple String deserializers (we'll parse JSON manually in listener)
+        config.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        config.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
 
         // Consumer behavior
         config.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-        config.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false); // Manual commit for safety
+        config.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, true);  // Auto-commit enabled
+
+        log.info("✅ Kafka Consumer Factory configured");
+        log.info("   Bootstrap servers: {}", bootstrapServers);
+        log.info("   Group ID: {}", groupId);
 
         return new DefaultKafkaConsumerFactory<>(config);
     }
 
     /**
-     * Kafka Listener Container Factory with DLQ Error Handler
-     *
-     * Configures:
-     * - Manual acknowledgment mode for precise offset control
-     * - DefaultErrorHandler with exponential backoff retry
-     * - DeadLetterPublishingRecoverer for sending failed messages to DLQ
+     * Kafka Listener Container Factory with DLQ and Error Handling
      */
     @Bean
-    public ConcurrentKafkaListenerContainerFactory<String, Object> kafkaListenerContainerFactory(
-            ConsumerFactory<String, Object> consumerFactory,
+    public ConcurrentKafkaListenerContainerFactory<String, String> kafkaListenerContainerFactory(
+            ConsumerFactory<String, String> consumerFactory,
             KafkaTemplate<String, Object> kafkaTemplate) {
 
-        ConcurrentKafkaListenerContainerFactory<String, Object> factory =
+        ConcurrentKafkaListenerContainerFactory<String, String> factory =
                 new ConcurrentKafkaListenerContainerFactory<>();
 
         factory.setConsumerFactory(consumerFactory);
-        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL);
 
-        // Configure DLQ Error Handler
+        // Use BATCH acknowledgment (works with auto-commit)
+        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.BATCH);
+
+        // Configure error handler with DLQ
         factory.setCommonErrorHandler(defaultErrorHandler(kafkaTemplate));
+
+        log.info("✅ Kafka Listener Container Factory configured");
 
         return factory;
     }
 
     /**
      * Default Error Handler with DLQ Support
-     *
-     * Retry Strategy:
-     * - Initial interval: 1000ms (1 second)
-     * - Multiplier: 2.0 (doubles each time)
-     * - Max attempts: 3 retries
-     * - Retry sequence: 1s → 2s → 4s → DLQ
-     *
-     * After all retries are exhausted, the message is sent to DLQ with error metadata.
      */
     private DefaultErrorHandler defaultErrorHandler(KafkaTemplate<String, Object> kafkaTemplate) {
 
-        // Exponential backoff configuration
-        ExponentialBackOff backOff = new ExponentialBackOff();
-        backOff.setInitialInterval(1000L);      // Start with 1 second
-        backOff.setMultiplier(2.0);             // Double the interval each retry
-        backOff.setMaxElapsedTime(10000L);      // Maximum 10 seconds total
+        // No retries - send directly to DLQ on failure
+        FixedBackOff backOff = new FixedBackOff(0L, 0L);
 
-        // Create DeadLetterPublishingRecoverer
-        // This sends failed messages to {original-topic}.DLQ
+        // Create DLQ recoverer
         DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(
                 kafkaTemplate,
                 (consumerRecord, exception) -> {
-                    // DLQ topic naming: original-topic + ".DLQ"
                     String dlqTopic = consumerRecord.topic() + ".DLQ";
-                    return new TopicPartition(dlqTopic, consumerRecord.partition());
+
+                    log.error("════════════════════════════════════════════════════════");
+                    log.error("❌ SENDING MESSAGE TO DLQ");
+                    log.error("   Original Topic: {}", consumerRecord.topic());
+                    log.error("   DLQ Topic: {}", dlqTopic);
+                    log.error("   Key: {}", consumerRecord.key());
+                    log.error("   Value: {}", consumerRecord.value());
+                    log.error("   Exception: {}", exception.getMessage());
+                    log.error("════════════════════════════════════════════════════════");
+
+                    return new TopicPartition(dlqTopic, 0);
                 }
         );
 
-        // Error metadata will be added to DLQ headers automatically:
-        // - kafka_dlt-original-topic
-        // - kafka_dlt-original-partition
-        // - kafka_dlt-original-offset
-        // - kafka_dlt-exception-fqcn (fully qualified class name)
-        // - kafka_dlt-exception-message
-        // - kafka_dlt-exception-stacktrace
-
         DefaultErrorHandler errorHandler = new DefaultErrorHandler(recoverer, backOff);
-
-        // Optional: Add logic to determine if an exception should be retried
-        // errorHandler.addNotRetryableExceptions(DeserializationException.class);
 
         return errorHandler;
     }
