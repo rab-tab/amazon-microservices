@@ -50,7 +50,14 @@ public class CircuitBreakerTestFilter implements Filter {
             return;
         }
 
-        // Check if we should simulate failure
+        // ✅ NEW: Only apply circuit breaker logic if test mode is enabled
+        if (!CircuitBreakerTestState.isTestModeEnabled()) {
+            // Not in circuit breaker test mode - pass through normally
+            chain.doFilter(request, response);
+            return;
+        }
+
+        // Check if we should simulate failure (only when test mode enabled)
         if (CircuitBreakerTestState.isSimulatingFailure()) {
             log.debug("🔴 Simulating service failure for request: {} {}",
                     httpRequest.getMethod(), path);

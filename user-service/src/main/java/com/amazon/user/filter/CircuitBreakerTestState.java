@@ -1,28 +1,52 @@
 package com.amazon.user.filter;
 
 /**
- * Static state holder for failure simulation.
- * Shared between CircuitBreakerTestController and CircuitBreakerTestFilter.
+ * Circuit Breaker Test State
  *
- * Thread-safe using volatile keyword.
+ * Thread-safe state management for circuit breaker testing
  */
 public class CircuitBreakerTestState {
 
     private static volatile boolean simulatingFailure = false;
+    private static volatile boolean testModeEnabled = false;
 
+    // ✅ ADD: Setter for simulatingFailure
     public static void setSimulatingFailure(boolean value) {
         simulatingFailure = value;
+        if (value) {
+            testModeEnabled = true;  // Auto-enable test mode when simulating failure
+        }
+    }
+
+    // ✅ ADD: Setter for testModeEnabled
+    public static void setTestModeEnabled(boolean value) {
+        testModeEnabled = value;
+        if (!value) {
+            simulatingFailure = false;  // Auto-disable simulation when disabling test mode
+        }
+    }
+
+    // Existing methods
+    public static void startSimulation() {
+        testModeEnabled = true;
+        simulatingFailure = true;
+    }
+
+    public static void stopSimulation() {
+        simulatingFailure = false;
+        testModeEnabled = false;
     }
 
     public static boolean isSimulatingFailure() {
         return simulatingFailure;
     }
 
-    /**
-     * Reset to normal operation.
-     * Called automatically on application startup.
-     */
+    public static boolean isTestModeEnabled() {
+        return testModeEnabled;
+    }
+
     public static void reset() {
         simulatingFailure = false;
+        testModeEnabled = false;
     }
 }
