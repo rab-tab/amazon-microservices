@@ -1,5 +1,6 @@
 package com.amazon.gateway.config;
 
+
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.github.resilience4j.timelimiter.TimeLimiterConfig;
@@ -9,41 +10,19 @@ import org.springframework.cloud.circuitbreaker.resilience4j.Resilience4JConfigB
 import org.springframework.cloud.circuitbreaker.resilience4j.Resilience4JConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 
 import java.time.Duration;
 
 /**
  * Gateway Circuit Breaker Configuration
  *
- * Configures Resilience4j circuit breakers for Spring Cloud Gateway routes.
- * Each downstream service (user, product, order, payment) gets its own CB.
- *
- * CB Configuration is in application.yml under resilience4j.circuitbreaker.configs.default
- *
- * Architecture:
- * - Layer 1 (Gateway): HTTP route protection, trips on 5xx/timeouts
- * - Layer 2 (Services): Internal operation protection (e.g., Kafka publishing)
- *
- * TIMEOUT ENFORCEMENT:
- * - TimeLimiter: 3 seconds (enforced at circuit breaker level)
- * - HTTP client: 3 seconds (transport level)
- * - Both work together to ensure fast failure
+ * CRITICAL: This configures the circuit breaker to record 5xx HTTP status codes as failures.
+ * Without this, CB only records exceptions, not HTTP error responses!
  */
 @Configuration
 public class GatewayCircuitBreakerConfig {
 
-    /**
-     * Create the ReactiveResilience4JCircuitBreakerFactory bean.
-     *
-     * CRITICAL: All 3 constructor parameters must be non-null in Spring Cloud 2023.0.0+
-     * - CircuitBreakerRegistry: manages CB instances
-     * - TimeLimiterRegistry: manages timeout instances
-     * - Resilience4JConfigurationProperties: config holder (can be empty)
-     *
-     * @param circuitBreakerRegistry Auto-configured by Spring Boot from application.yml
-     * @param timeLimiterRegistry Auto-configured by Spring Boot
-     * @return Configured factory for creating reactive circuit breakers
-     */
     @Bean
     public ReactiveResilience4JCircuitBreakerFactory reactiveCircuitBreakerFactory(
             CircuitBreakerRegistry circuitBreakerRegistry,
@@ -56,28 +35,41 @@ public class GatewayCircuitBreakerConfig {
                         new Resilience4JConfigurationProperties()
                 );
 
-        // ═══════════════════════════════════════════════════════════════════════
-        // Configure default behavior with EXPLICIT TimeLimiter timeout
-        // ═══════════════════════════════════════════════════════════════════════
+        // Configure default behavior
         factory.configureDefault(id -> {
-            // Get CircuitBreaker config from registry or use default config from application.yml
-            CircuitBreakerConfig cbConfig = circuitBreakerRegistry
+
+            // Get base config from application.yml
+            CircuitBreakerConfig baseConfig = circuitBreakerRegistry
                     .getConfiguration(id)
                     .orElseGet(() -> circuitBreakerRegistry.getDefaultConfig());
 
-            // ═══════════════════════════════════════════════════════════════════
-            // CRITICAL: Explicit TimeLimiter config with 3-second timeout
-            // This enforces timeout at the circuit breaker level
-            // Without this, requests can hang indefinitely!
-            // ═══════════════════════════════════════════════════════════════════
+            // CRITICAL: Override to record 5xx as failures
+            CircuitBreakerConfig cbConfig = CircuitBreakerConfig.from(baseConfig)
+                    .recordException(throwable -> {
+                        // Record WebClient 5xx responses as failures
+                        if (throwable instanceof WebClientResponseException) {
+                            WebClientResponseException webEx = (WebClientResponseException) throwable;
+                            boolean is5xx = webEx.getStatusCode().is5xxServerError();
+                            System.out.println("CB Recording exception: " + throwable.getClass().getName() +
+                                    " | Status: " + webEx.getStatusCode() +
+                                    " | Recording as failure: " + is5xx);
+                            return is5xx;
+                        }
+                        // Record all other exceptions
+                        System.out.println("CB Recording exception: " + throwable.getClass().getName());
+                        return true;
+                    })
+                    .build();
+
+            // TimeLimiter config
             TimeLimiterConfig tlConfig = TimeLimiterConfig.custom()
-                    .timeoutDuration(Duration.ofSeconds(3))  // 3-second timeout
-                    .cancelRunningFuture(true)                // Cancel request on timeout
+                    .timeoutDuration(Duration.ofSeconds(3))
+                    .cancelRunningFuture(true)
                     .build();
 
             return new Resilience4JConfigBuilder(id)
                     .circuitBreakerConfig(cbConfig)
-                    .timeLimiterConfig(tlConfig)  // Use explicit config (not from registry)
+                    .timeLimiterConfig(tlConfig)
                     .build();
         });
 

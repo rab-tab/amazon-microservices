@@ -133,7 +133,8 @@ public class SecurityConfig {
                 path.startsWith("/api/products") && !path.contains("/api/products/") ||  // List only
                 path.matches("/api/products/[^/]+$") ||  // Individual product view
                 path.startsWith("/actuator") ||
-                path.contains("/test/circuit-breaker") ||
+                path.contains("/test/circuit-breaker")||
+                path.startsWith("/cb/status/")||
                 path.startsWith("/fallback")||
 
         // Test endpoints (for automated testing)

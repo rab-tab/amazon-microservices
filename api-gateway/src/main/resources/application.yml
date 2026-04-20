@@ -104,6 +104,10 @@ spring:
             - Path=/api/users/health
           filters:
             - SetPath=/api/v1/users/health
+            - name: CircuitBreaker          # ← ADD THIS!
+              args:
+                name: userService
+                fallbackUri: forward:/fallback/user-service
 
         # Test Endpoints (NO CircuitBreaker, NO Rate Limiting - for testing)
         - id: user-service-test
@@ -113,6 +117,10 @@ spring:
           filters:
             - RewritePath=/api/users/test/(?<segment>.*), /api/v1/users/test/${segment}
 
+        - id: connect-timeout-test
+          uri: http://10.255.255.1:9999  # Unreachable IP
+          predicates:
+              - Path=/api/test/connect-timeout
         # All Other User Endpoints (Rate Limited by User)
         - id: user-service
           uri: http://localhost:8081
@@ -274,24 +282,31 @@ resilience4j:
   circuitbreaker:
     configs:
       default:
-        slidingWindowSize: 5
-        failureRateThreshold: 50
-        waitDurationInOpenState: 10s
-        permittedNumberOfCallsInHalfOpenState: 3
-        registerHealthIndicator: true
-        recordExceptions:
-          - org.springframework.web.client.HttpServerErrorException
-          - java.util.concurrent.TimeoutException
-          - java.io.IOException
+          slidingWindowSize: 10              # ← Increased from 5
+          minimumNumberOfCalls: 5            # ← ADD THIS!
+          failureRateThreshold: 50
+          waitDurationInOpenState: 10s
+          permittedNumberOfCallsInHalfOpenState: 3
+          registerHealthIndicator: true
+          automaticTransitionFromOpenToHalfOpenEnabled: true  # ← ADD THIS!
+          eventConsumerBufferSize: 10        # ← ADD THIS!
+          recordExceptions:
+            - org.springframework.web.client.HttpServerErrorException
+            - java.util.concurrent.TimeoutException
+            - java.io.IOException
     instances:
       userService:
         baseConfig: default
+        registerHealthIndicator: true  # ← Add this
       productService:
         baseConfig: default
+        registerHealthIndicator: true  # ← Add this
       orderService:
         baseConfig: default
+        registerHealthIndicator: true  # ← Add this
       paymentService:
         baseConfig: default
+        registerHealthIndicator: true  # ← Add this
 
   timelimiter:
     configs:
