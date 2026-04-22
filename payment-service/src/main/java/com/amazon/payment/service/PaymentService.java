@@ -28,13 +28,10 @@ public class PaymentService {
     private static final String PAYMENT_RESULT_TOPIC = "payment.result";
     private final Random random = new Random();
 
-    /**
-     * Consume payment requests as String (matches StringDeserializer)
-     */
     @KafkaListener(
             topics = "payment.request",
             groupId = "payment-service",
-            containerFactory = "kafkaListenerContainerFactory"  // ✅ Explicit factory
+            containerFactory = "kafkaListenerContainerFactory"
     )
     @Transactional
     public void processPaymentRequest(String message) {
@@ -44,7 +41,6 @@ public class PaymentService {
         log.info("   Raw Message: {}", message);
 
         try {
-            // Parse JSON
             @SuppressWarnings("unchecked")
             Map<String, Object> request = objectMapper.readValue(message, Map.class);
 
@@ -52,7 +48,22 @@ public class PaymentService {
             String userId = (String) request.get("userId");
             Object amountObj = request.get("amount");
 
-            // Handle amount (could be Integer, Double, or String)
+            // ═══════════════════════════════════════════════════════════
+            // ⭐ CHECK FOR TEST SCENARIO FLAG
+            // ═══════════════════════════════════════════════════════════
+            String testScenario = (String) request.get("testScenario");
+
+            if (testScenario != null && !testScenario.isBlank()) {
+                log.info("🧪 TEST SCENARIO DETECTED: {}", testScenario);
+                handleTestScenario(orderId, userId, amountObj, testScenario);
+                log.info("════════════════════════════════════════════════════════");
+                return;
+            }
+
+            // ═══════════════════════════════════════════════════════════
+            // NORMAL PAYMENT PROCESSING (no test scenario)
+            // ═══════════════════════════════════════════════════════════
+
             BigDecimal amount;
             if (amountObj instanceof Number) {
                 amount = BigDecimal.valueOf(((Number) amountObj).doubleValue());
@@ -65,7 +76,6 @@ public class PaymentService {
             log.info("   User ID: {}", userId);
             log.info("   Amount: {}", amount);
 
-            // Create payment
             Payment payment = Payment.builder()
                     .orderId(UUID.fromString(orderId))
                     .userId(UUID.fromString(userId))
@@ -93,7 +103,6 @@ public class PaymentService {
             payment = paymentRepository.save(payment);
             log.info("💾 Status saved: {}", payment.getStatus());
 
-            // Publish result
             publishPaymentResult(payment);
 
             log.info("════════════════════════════════════════════════════════");
@@ -104,15 +113,90 @@ public class PaymentService {
             log.error("   Message: {}", message);
             log.error("   Error: ", e);
             log.error("════════════════════════════════════════════════════════");
-            throw new RuntimeException("Failed to process payment", e);  // Send to DLQ
+            throw new RuntimeException("Failed to process payment", e);
         }
     }
 
     /**
-     * Publish payment result
+     * ⭐ NEW: Handle test scenarios for automated testing
+     *
+     * Supported scenarios:
+     * - SUCCESS: Payment succeeds
+     * - FAILED / INSUFFICIENT_FUNDS: Payment fails due to insufficient funds
+     * - FRAUD: Payment blocked due to fraud detection
+     * - CARD_EXPIRED: Payment fails due to expired card
+     * - NETWORK_ERROR: Payment fails due to network issues
+     * - TIMEOUT: No response (simulates timeout)
+     */
+    private void handleTestScenario(String orderId, String userId, Object amountObj, String scenario) {
+        BigDecimal amount;
+        if (amountObj instanceof Number) {
+            amount = BigDecimal.valueOf(((Number) amountObj).doubleValue());
+        } else {
+            amount = new BigDecimal(amountObj.toString());
+        }
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("orderId", orderId);
+        result.put("paymentId", UUID.randomUUID().toString());
+        result.put("amount", amount);
+
+        switch (scenario.toUpperCase()) {
+            case "FAILED":
+            case "INSUFFICIENT_FUNDS":
+                result.put("status", "FAILED");
+                result.put("transactionId", "");
+                result.put("failureReason", "Insufficient funds");
+                log.info("🧪 Simulating: FAILED payment (Insufficient funds)");
+                publishTestResult(orderId, result);
+                break;
+
+            case "FRAUD":
+                result.put("status", "FAILED");
+                result.put("transactionId", "");
+                result.put("failureReason", "Fraud detected");
+                result.put("fraudScore", 95);
+                log.info("🧪 Simulating: FRAUD detection");
+                publishTestResult(orderId, result);
+                break;
+
+            case "CARD_EXPIRED":
+                result.put("status", "FAILED");
+                result.put("transactionId", "");
+                result.put("failureReason", "Card expired");
+                log.info("🧪 Simulating: CARD_EXPIRED");
+                publishTestResult(orderId, result);
+                break;
+
+            case "NETWORK_ERROR":
+                result.put("status", "FAILED");
+                result.put("transactionId", "");
+                result.put("failureReason", "Network error - please retry");
+                log.info("🧪 Simulating: NETWORK_ERROR");
+                publishTestResult(orderId, result);
+                break;
+
+            case "TIMEOUT":
+                // Don't publish any result - simulate timeout
+                log.info("🧪 Simulating: TIMEOUT - no result will be published");
+                log.info("   Order {} will not receive payment confirmation", orderId);
+                // Intentionally do nothing - no Kafka message published
+                break;
+
+            case "SUCCESS":
+            default:
+                result.put("status", "SUCCESS");
+                result.put("transactionId", "TXN-TEST-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
+                log.info("🧪 Simulating: SUCCESS payment");
+                publishTestResult(orderId, result);
+                break;
+        }
+    }
+
+    /**
+     * Publish payment result (normal production flow)
      */
     private void publishPaymentResult(Payment payment) {
-
         log.info("📤 Publishing to payment.result...");
 
         Map<String, Object> result = new HashMap<>();
@@ -122,8 +206,27 @@ public class PaymentService {
         result.put("amount", payment.getAmount());
         result.put("transactionId", payment.getTransactionId() != null ? payment.getTransactionId() : "");
 
+        if (payment.getStatus() == Payment.PaymentStatus.FAILED) {
+            result.put("failureReason", payment.getFailureReason());
+        }
+
+        publishToKafka(payment.getOrderId().toString(), result);
+    }
+
+    /**
+     * ⭐ NEW: Publish test result
+     */
+    private void publishTestResult(String orderId, Map<String, Object> result) {
+        log.info("📤 Publishing TEST result to payment.result...");
+        publishToKafka(orderId, result);
+    }
+
+    /**
+     * Common Kafka publishing logic
+     */
+    private void publishToKafka(String orderId, Map<String, Object> result) {
         try {
-            kafkaTemplate.send(PAYMENT_RESULT_TOPIC, payment.getOrderId().toString(), result)
+            kafkaTemplate.send(PAYMENT_RESULT_TOPIC, orderId, result)
                     .whenComplete((sendResult, exception) -> {
                         if (exception != null) {
                             log.error("❌ Publish FAILED", exception);

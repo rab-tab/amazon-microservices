@@ -3,16 +3,19 @@ package com.amazon.order.service;
 import com.amazon.order.dto.OrderDto;
 import com.amazon.order.entity.Order;
 import com.amazon.order.entity.OrderItem;
+import com.amazon.order.event.OrderCreatedEvent;
 import com.amazon.order.event.OrderEvent;
 import com.amazon.order.exception.DuplicateOrderException;
 import com.amazon.order.exception.KafkaPublishException;
 import com.amazon.order.exception.OrderNotFoundException;
 import com.amazon.order.exception.OrderStateException;
 import com.amazon.order.repository.OrderRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -23,6 +26,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -38,14 +42,22 @@ public class OrderService {
     private final KafkaTemplate<String, Object> kafkaTemplate;
     private final MeterRegistry meterRegistry;
     private final HttpServletRequest httpServletRequest;
+    private final ObjectMapper objectMapper;
+    private final ApplicationEventPublisher applicationEventPublisher;  // ⭐ NEW: For transactional events
 
     private static final String ORDER_EVENTS_TOPIC = "order.events";
     private static final String PAYMENT_REQUEST_TOPIC = "payment.request";
 
     /**
      * Create a new order and publish events to Kafka
+     *
+     * ⭐ IMPORTANT: Uses transactional event publishing to prevent race conditions
+     * Events are published AFTER the transaction commits, ensuring the order
+     * exists in the database before Kafka consumers process it.
+     *
      * Supports fault injection via X-Fault header for testing
      * Supports idempotency via idempotencyKey parameter
+     * Supports test scenarios via X-Test-Scenario header
      *
      * @param request Order creation request
      * @param userId User ID from gateway
@@ -102,7 +114,7 @@ public class OrderService {
         // ═══════════════════════════════════════════════════════════════════════
         Order order = Order.builder()
                 .userId(userId)
-                .idempotencyKey(idempotencyKey)  // ← NEW: Add idempotency key
+                .idempotencyKey(idempotencyKey)
                 .items(items)
                 .totalAmount(totalAmount)
                 .shippingAddress(request.getShippingAddress())
@@ -119,13 +131,11 @@ public class OrderService {
                     order.getId(), userId, idempotencyKey);
 
         } catch (DataIntegrityViolationException e) {
-            // Race condition: Another thread/instance created order with same idempotency key
             log.warn("⚠️  Concurrent order creation detected for idempotency key: {}. " +
                     "Database unique constraint prevented duplicate.", idempotencyKey);
 
             meterRegistry.counter("orders.concurrent_duplicate_prevented").increment();
 
-            // Fetch the order that was created by the concurrent request
             Order concurrentOrder = orderRepository.findByIdempotencyKey(idempotencyKey)
                     .orElseThrow(() -> new IllegalStateException(
                             "Concurrent insert race condition for idempotency key: " + idempotencyKey));
@@ -143,37 +153,64 @@ public class OrderService {
 
         if (faultHeader != null && !faultHeader.isEmpty()) {
             simulateKafkaFailure(faultHeader, order);
-            // If no exception thrown above, continue to normal flow
         }
 
         // ═══════════════════════════════════════════════════════════════════════
-        // STEP 7: PUBLISH EVENTS TO KAFKA (normal flow)
+        // STEP 7: EXTRACT TEST SCENARIO HEADER
         // ═══════════════════════════════════════════════════════════════════════
-        try {
-            // Publish order created event (triggers payment saga)
-            publishOrderEvent("ORDER_CREATED", order);
-
-            // Publish payment request
-            publishPaymentRequest(order);
-
-            log.info("✅ Events published successfully for order: {}", order.getId());
-            meterRegistry.counter("orders.events_published").increment();
-
-        } catch (Exception e) {
-            // Real Kafka failure (not fault injection)
-            log.error("❌ Failed to publish events for order: {}", order.getId(), e);
-            meterRegistry.counter("orders.kafka_publish_failed").increment();
-
-            // Throw exception to trigger transaction rollback
-            // This will also rollback the order creation (database save)
-            throw new KafkaPublishException("Failed to publish order events", e);
-        }
+        String testScenario = extractTestScenario();
 
         // ═══════════════════════════════════════════════════════════════════════
-        // STEP 8: UPDATE METRICS & RETURN RESPONSE
+        // ⭐ STEP 8: PUBLISH DOMAIN EVENT (will trigger Kafka publishing AFTER commit)
+        // ═══════════════════════════════════════════════════════════════════════
+        log.info("🔔 Publishing OrderCreatedEvent (Kafka messages will be sent after transaction commits)");
+        applicationEventPublisher.publishEvent(
+                new OrderCreatedEvent(this, order, testScenario)
+        );
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // STEP 9: UPDATE METRICS & RETURN RESPONSE
         // ═══════════════════════════════════════════════════════════════════════
         meterRegistry.counter("orders.created").increment();
+
+        log.info("📋 Order creation method completing - transaction will commit next");
+        log.info("   → On commit, @TransactionalEventListener will publish to Kafka");
+
         return mapToResponse(order);
+
+        // ← TRANSACTION COMMITS HERE
+        // ↓ OrderEventPublisher.handleOrderCreated() is triggered
+        // ↓ Kafka messages are published
+    }
+
+    /**
+     * Extract test scenario from HTTP request header
+     *
+     * This allows automated tests to control payment service behavior
+     * by passing X-Test-Scenario header with values like:
+     * - SUCCESS: Payment succeeds
+     * - FAILED: Payment fails (insufficient funds)
+     * - FRAUD: Fraud detection triggered
+     * - CARD_EXPIRED: Card expired error
+     * - TIMEOUT: Payment service doesn't respond
+     * - NETWORK_ERROR: Network error during payment
+     *
+     * @return Test scenario string or null if not present
+     */
+    private String extractTestScenario() {
+        try {
+            String testScenario = httpServletRequest.getHeader("X-Test-Scenario");
+
+            if (testScenario != null && !testScenario.isBlank()) {
+                log.info("🧪 Test scenario detected in request: {}", testScenario);
+                meterRegistry.counter("orders.test_scenario_used", "scenario", testScenario).increment();
+                return testScenario;
+            }
+        } catch (Exception e) {
+            log.debug("Could not extract test scenario from request", e);
+        }
+
+        return null;
     }
 
     /**
@@ -210,21 +247,18 @@ public class OrderService {
     private void simulateKafkaFailure(String faultType, Order order) {
         log.error("🔥 FAULT INJECTION: Type='{}' for order: {}", faultType, order.getId());
 
-        // Track simulated failures by type
         meterRegistry.counter("orders.kafka_failure_simulated", "type", faultType).increment();
 
         switch (faultType) {
             case "kafka-down":
-                // Test 10a: Complete Kafka broker unavailability
                 throw new KafkaPublishException(
                         "Simulated Kafka failure - broker unreachable for order: " + order.getId()
                 );
 
             case "kafka-timeout":
-                // Test 10b: Producer timeout waiting for broker
                 try {
                     log.warn("Simulating producer timeout delay...");
-                    Thread.sleep(100); // Simulate network delay
+                    Thread.sleep(100);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
@@ -233,38 +267,32 @@ public class OrderService {
                 );
 
             case "kafka-retry-failure":
-                // Test 10c: Producer retry exhaustion
                 throw new KafkaPublishException(
                         "Simulated retry failure - max retries exceeded for order: " + order.getId()
                 );
 
             case "kafka-ack-failure":
-                // Test 10d: Acknowledgment failure (min.insync.replicas not met)
                 throw new KafkaPublishException(
                         "Simulated ack failure - insufficient in-sync replicas for order: " + order.getId()
                 );
 
             case "serialization-error":
-                // Test 10e: Message serialization failure
                 throw new KafkaPublishException(
                         "Simulated serialization error - cannot serialize event for order: " + order.getId()
                 );
 
             case "message-too-large":
-                // Test 10f: Message size exceeding broker limit
                 throw new KafkaPublishException(
                         "Simulated message too large - event exceeds max.message.bytes for order: " + order.getId()
                 );
 
             case "buffer-full":
-                // Producer buffer overflow
                 throw new KafkaPublishException(
                         "Simulated buffer full - producer buffer overflow for order: " + order.getId()
                 );
 
             default:
                 log.warn("⚠️  Unknown fault injection type: '{}' - ignoring", faultType);
-                // Don't throw exception for unknown fault types
         }
     }
 
@@ -313,32 +341,124 @@ public class OrderService {
     /**
      * Handle payment result events from payment service
      * Updates order status based on payment success/failure
+     *
+     * ⭐ CRITICAL: This now works correctly because OrderEventPublisher ensures
+     * that payment requests are only sent AFTER the order transaction commits.
      */
-    @KafkaListener(topics = "payment.result", groupId = "order-service")
-    public void handlePaymentResult(Map<String, Object> event) {
-        String orderId = (String) event.get("orderId");
-        String paymentStatus = (String) event.get("status");
-        String paymentId = (String) event.get("paymentId");
+    @KafkaListener(
+            topics = "payment.result",
+            groupId = "order-service",
+            containerFactory = "kafkaListenerContainerFactory"
+    )
+    @Transactional
+    public void handlePaymentResult(String message) {
+        try {
+            log.info("════════════════════════════════════════════════════════");
+            log.info("📨 PAYMENT RESULT RECEIVED");
+            log.info("   Raw Message: {}", message);
 
-        if (orderId == null) {
-            log.warn("Received payment result with null orderId - ignoring");
-            return;
-        }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> event = objectMapper.readValue(message, Map.class);
 
-        orderRepository.findById(UUID.fromString(orderId)).ifPresent(order -> {
+            String orderId = (String) event.get("orderId");
+            String paymentStatus = (String) event.get("status");
+            String paymentId = (String) event.get("paymentId");
+            String failureReason = (String) event.get("failureReason");
+            Object fraudScoreObj = event.get("fraudScore");
+            String transactionId = (String) event.get("transactionId");
+
+            log.info("   Parsed - Order ID: {}, Status: {}", orderId, paymentStatus);
+
+            if (orderId == null) {
+                log.warn("❌ Null orderId - ignoring");
+                return;
+            }
+
+            // Convert fraudScore safely
+            Integer fraudScore = null;
+            if (fraudScoreObj != null) {
+                fraudScore = (fraudScoreObj instanceof Integer)
+                        ? (Integer) fraudScoreObj
+                        : Integer.parseInt(fraudScoreObj.toString());
+            }
+
+            // Find order
+            log.info("🔍 Looking up order: {}", orderId);
+            Optional<Order> orderOpt = orderRepository.findById(UUID.fromString(orderId));
+
+            if (orderOpt.isEmpty()) {
+                log.error("❌ ORDER NOT FOUND: {}", orderId);
+                log.error("   This should NOT happen if transactional events are working correctly!");
+                return;
+            }
+
+            Order order = orderOpt.get();
+            log.info("✅ Found order - Current status: {}", order.getStatus());
+
+            // Update order based on payment status
             if ("SUCCESS".equals(paymentStatus)) {
+                log.info("💳 Processing SUCCESS payment");
                 order.setStatus(Order.OrderStatus.CONFIRMED);
                 order.setPaymentId(UUID.fromString(paymentId));
-                log.info("Order {} confirmed after payment success", orderId);
+                order.setPaymentTransactionId(transactionId);
                 meterRegistry.counter("orders.confirmed").increment();
+
             } else {
+                log.info("💳 Processing FAILED payment - Reason: {}", failureReason);
                 order.setStatus(Order.OrderStatus.PAYMENT_FAILED);
-                log.warn("Order {} payment failed", orderId);
-                meterRegistry.counter("orders.payment_failed").increment();
+                order.setPaymentFailureReason(failureReason);
+                order.setPaymentFraudScore(fraudScore);
+                order.setPaymentRetryable(isRetryable(failureReason));
+                meterRegistry.counter("orders.payment_failed",
+                        "reason", failureReason != null ? failureReason : "unknown").increment();
             }
-            orderRepository.save(order);
-            publishOrderEvent("ORDER_STATUS_UPDATED", order);
-        });
+
+            // Save order
+            log.info("💾 Saving order with new status: {}", order.getStatus());
+            Order savedOrder = orderRepository.save(order);
+            log.info("✅ Order saved successfully!");
+            log.info("   Order ID: {}", savedOrder.getId());
+            log.info("   New Status: {}", savedOrder.getStatus());
+            log.info("   Payment Failure Reason: {}", savedOrder.getPaymentFailureReason());
+
+            // Publish event
+            publishOrderEvent("ORDER_STATUS_UPDATED", savedOrder);
+            log.info("📤 ORDER_STATUS_UPDATED event published");
+            log.info("════════════════════════════════════════════════════════");
+
+        } catch (Exception e) {
+            log.error("════════════════════════════════════════════════════════");
+            log.error("❌ EXCEPTION in handlePaymentResult", e);
+            log.error("   Message: {}", message);
+            log.error("════════════════════════════════════════════════════════");
+            // Don't rethrow - would cause infinite retries
+        }
+    }
+
+    /**
+     * Determine if payment failure is retryable
+     */
+    private boolean isRetryable(String failureReason) {
+        if (failureReason == null) return false;
+
+        // Network errors and timeouts are retryable
+        if (failureReason.contains("Network error") ||
+                failureReason.contains("timeout")) {
+            return true;
+        }
+
+        // Fraud and card expired are NOT retryable (need new payment method)
+        if (failureReason.contains("Fraud") ||
+                failureReason.contains("expired")) {
+            return false;
+        }
+
+        // Insufficient funds might be retryable (user could add money)
+        if (failureReason.contains("Insufficient funds")) {
+            return true;
+        }
+
+        return false;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -347,7 +467,9 @@ public class OrderService {
 
     /**
      * Publish order event to Kafka
-     * Event types: ORDER_CREATED, ORDER_CANCELLED, ORDER_STATUS_UPDATED
+     * Event types: ORDER_CANCELLED, ORDER_STATUS_UPDATED
+     *
+     * Note: ORDER_CREATED is now published via OrderEventPublisher after transaction commit
      */
     private void publishOrderEvent(String eventType, Order order) {
         OrderEvent event = OrderEvent.builder()
@@ -369,21 +491,6 @@ public class OrderService {
 
         kafkaTemplate.send(ORDER_EVENTS_TOPIC, order.getId().toString(), event);
         log.info("📤 Published {} event for order: {}", eventType, order.getId());
-    }
-
-    /**
-     * Publish payment request to payment service
-     */
-    private void publishPaymentRequest(Order order) {
-        Map<String, Object> paymentRequest = Map.of(
-                "orderId", order.getId().toString(),
-                "userId", order.getUserId().toString(),
-                "amount", order.getTotalAmount(),
-                "currency", "USD"
-        );
-
-        kafkaTemplate.send(PAYMENT_REQUEST_TOPIC, order.getId().toString(), paymentRequest);
-        log.info("💳 Payment request published for order: {}", order.getId());
     }
 
     /**
@@ -413,6 +520,10 @@ public class OrderService {
                 .notes(order.getNotes())
                 .createdAt(order.getCreatedAt())
                 .updatedAt(order.getUpdatedAt())
+                .paymentFailureReason(order.getPaymentFailureReason())
+                .paymentFraudScore(order.getPaymentFraudScore())
+                .paymentTransactionId(order.getPaymentTransactionId())
+                .paymentRetryable(order.getPaymentRetryable())
                 .build();
     }
 }

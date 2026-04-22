@@ -81,6 +81,13 @@ public class OrderDto {
         private String notes;
         private LocalDateTime createdAt;
         private LocalDateTime updatedAt;
+
+
+        // ⭐ NEW: Payment details
+        private String paymentTransactionId;
+        private String paymentFailureReason;
+        private Integer paymentFraudScore;
+        private Boolean paymentRetryable;
     }
 
     @Getter
@@ -95,4 +102,5 @@ public class OrderDto {
         private long totalElements;
         private int totalPages;
     }
+
 }

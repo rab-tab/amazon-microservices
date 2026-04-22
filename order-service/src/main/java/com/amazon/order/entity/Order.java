@@ -30,7 +30,6 @@ public class Order {
     @Column(name = "idempotency_key", unique = true, length = 256)
     private String idempotencyKey;
 
-
     @Column(name = "user_id", nullable = false)
     private UUID userId;
 
@@ -56,8 +55,26 @@ public class Order {
     @Column(name = "tracking_number")
     private String trackingNumber;
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // ⭐ PAYMENT FAILURE DETAILS - Already present in your code
+    // ═══════════════════════════════════════════════════════════════════════
 
-    // ✅ ADD THIS - Optimistic locking
+    @Column(name = "payment_failure_reason")
+    private String paymentFailureReason;
+
+    @Column(name = "payment_fraud_score")
+    private Integer paymentFraudScore;
+
+    @Column(name = "payment_transaction_id")
+    private String paymentTransactionId;
+
+    @Column(name = "payment_retryable")
+    private Boolean paymentRetryable;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // OPTIMISTIC LOCKING & TIMESTAMPS
+    // ═══════════════════════════════════════════════════════════════════════
+
     @Version
     @Column(name = "version")
     private Long version;
@@ -84,8 +101,19 @@ public class Order {
         updatedAt = LocalDateTime.now();
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // ORDER STATUS ENUM
+    // ═══════════════════════════════════════════════════════════════════════
+
     public enum OrderStatus {
-        PENDING, CONFIRMED, PAYMENT_PROCESSING, PAYMENT_FAILED,
-        PROCESSING, SHIPPED, DELIVERED, CANCELLED, REFUNDED
+        PENDING,
+        CONFIRMED,
+        PAYMENT_PROCESSING,
+        PAYMENT_FAILED,
+        PROCESSING,
+        SHIPPED,
+        DELIVERED,
+        CANCELLED,
+        REFUNDED
     }
 }
