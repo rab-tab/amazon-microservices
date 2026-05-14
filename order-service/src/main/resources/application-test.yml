@@ -1,0 +1,8 @@
+spring:
+  redis:
+    host: localhost
+    port: 6379
+
+order:
+  idempotency:
+    ttl-seconds: 5  # ⭐ 5 seconds for testing (vs 86400 in production)

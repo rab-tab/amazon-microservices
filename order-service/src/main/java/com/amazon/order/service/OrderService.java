@@ -5,7 +5,6 @@ import com.amazon.order.entity.Order;
 import com.amazon.order.entity.OrderItem;
 import com.amazon.order.event.OrderCreatedEvent;
 import com.amazon.order.event.OrderEvent;
-import com.amazon.order.exception.DuplicateOrderException;
 import com.amazon.order.exception.KafkaPublishException;
 import com.amazon.order.exception.OrderNotFoundException;
 import com.amazon.order.exception.OrderStateException;
@@ -13,10 +12,11 @@ import com.amazon.order.repository.OrderRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.servlet.http.HttpServletRequest;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.kafka.annotation.KafkaListener;
@@ -26,7 +26,6 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -43,10 +42,24 @@ public class OrderService {
     private final MeterRegistry meterRegistry;
     private final HttpServletRequest httpServletRequest;
     private final ObjectMapper objectMapper;
-    private final ApplicationEventPublisher applicationEventPublisher;  // ⭐ NEW: For transactional events
+    private final ApplicationEventPublisher applicationEventPublisher;
+    private final OrderIdempotencyService idempotencyService;
 
     private static final String ORDER_EVENTS_TOPIC = "order.events";
     private static final String PAYMENT_REQUEST_TOPIC = "payment.request";
+    private static final int MAX_POLL_ATTEMPTS = 50;  // 50 * 100ms = 5 seconds
+    private static final long POLL_INTERVAL_MS = 100;
+
+    /**
+     * Result wrapper for order creation
+     * Contains the order and a flag indicating if it was a duplicate request
+     */
+    @Getter
+    @AllArgsConstructor
+    public static class OrderResult {
+        private final OrderDto.OrderResponse order;
+        private final boolean isDuplicate;
+    }
 
     /**
      * Create a new order and publish events to Kafka
@@ -62,140 +75,152 @@ public class OrderService {
      * @param request Order creation request
      * @param userId User ID from gateway
      * @param idempotencyKey Unique key for duplicate detection
-     * @return Order response
-     * @throws DuplicateOrderException if order with same idempotency key exists
+     * @return OrderResult containing the order and duplicate flag
      */
-    public OrderDto.OrderResponse createOrder(
+    public OrderResult createOrder(
             OrderDto.CreateOrderRequest request,
             UUID userId,
             String idempotencyKey) {
 
         log.info("Creating order for user: {} with idempotency key: {}", userId, idempotencyKey);
 
-        // ═══════════════════════════════════════════════════════════════════════
-        // STEP 1: CHECK FOR DUPLICATE (Idempotency)
-        // ═══════════════════════════════════════════════════════════════════════
-        Optional<Order> existingOrder = orderRepository.findByIdempotencyKey(idempotencyKey);
+        // ═══════════════════════════════════════════════════════════════
+        // ⭐ STEP 1: CHECK IDEMPOTENCY (Redis + DB + Lock)
+        // ═══════════════════════════════════════════════════════════════
+        String existingOrderId = idempotencyService.checkAndAcquire(userId, idempotencyKey);
 
-        if (existingOrder.isPresent()) {
-            log.info("🔄 Duplicate order detected for idempotency key: {}. Existing order: {}",
-                    idempotencyKey, existingOrder.get().getId());
-
+        if (existingOrderId != null) {
+            log.info("🔄 Duplicate request detected - returning existing order: {}", existingOrderId);
             meterRegistry.counter("orders.duplicate_detected").increment();
 
-            throw new DuplicateOrderException(
-                    "Order with this idempotency key already exists: " + idempotencyKey,
-                    existingOrder.get().getId()
-            );
+            // ⭐ Return existing order with duplicate flag = true
+            OrderDto.OrderResponse existingOrder = getOrderByIdWithPolling(UUID.fromString(existingOrderId));
+            return new OrderResult(existingOrder, true);
         }
 
-        // ═══════════════════════════════════════════════════════════════════════
-        // STEP 2: BUILD ORDER ITEMS
-        // ═══════════════════════════════════════════════════════════════════════
-        List<OrderItem> items = request.getItems().stream()
-                .map(itemReq -> OrderItem.builder()
-                        .productId(itemReq.getProductId())
-                        .productName(itemReq.getProductName())
-                        .quantity(itemReq.getQuantity())
-                        .unitPrice(itemReq.getUnitPrice())
-                        .totalPrice(itemReq.getUnitPrice().multiply(BigDecimal.valueOf(itemReq.getQuantity())))
-                        .build())
-                .toList();
+        log.info("✅ New order request - lock acquired, proceeding with creation");
 
-        // ═══════════════════════════════════════════════════════════════════════
-        // STEP 3: CALCULATE TOTAL AMOUNT
-        // ═══════════════════════════════════════════════════════════════════════
-        BigDecimal totalAmount = items.stream()
-                .map(OrderItem::getTotalPrice)
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
+        // Lock acquired - proceed with order creation
+        Order order = null;
 
-        // ═══════════════════════════════════════════════════════════════════════
-        // STEP 4: BUILD ORDER ENTITY (with idempotency key)
-        // ═══════════════════════════════════════════════════════════════════════
-        Order order = Order.builder()
-                .userId(userId)
-                .idempotencyKey(idempotencyKey)
-                .items(items)
-                .totalAmount(totalAmount)
-                .shippingAddress(request.getShippingAddress())
-                .notes(request.getNotes())
-                .status(Order.OrderStatus.PENDING)
-                .build();
-
-        // ═══════════════════════════════════════════════════════════════════════
-        // STEP 5: SAVE ORDER TO DATABASE (with unique constraint protection)
-        // ═══════════════════════════════════════════════════════════════════════
         try {
+            // ═══════════════════════════════════════════════════════════════
+            // STEP 2-4: BUILD ORDER
+            // ═══════════════════════════════════════════════════════════════
+            List<OrderItem> items = request.getItems().stream()
+                    .map(itemReq -> OrderItem.builder()
+                            .productId(itemReq.getProductId())
+                            .productName(itemReq.getProductName())
+                            .quantity(itemReq.getQuantity())
+                            .unitPrice(itemReq.getUnitPrice())
+                            .totalPrice(itemReq.getUnitPrice()
+                                    .multiply(BigDecimal.valueOf(itemReq.getQuantity())))
+                            .build())
+                    .toList();
+
+            BigDecimal totalAmount = items.stream()
+                    .map(OrderItem::getTotalPrice)
+                    .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+            order = Order.builder()
+                    .userId(userId)
+                    .idempotencyKey(idempotencyKey)
+                    .items(items)
+                    .totalAmount(totalAmount)
+                    .shippingAddress(request.getShippingAddress())
+                    .notes(request.getNotes())
+                    .status(Order.OrderStatus.PENDING)
+                    .build();
+
+            // ═══════════════════════════════════════════════════════════════
+            // STEP 5: SAVE ORDER
+            // ═══════════════════════════════════════════════════════════════
             order = orderRepository.save(order);
-            log.info("✅ Order created: {} for user: {} with idempotency key: {}",
-                    order.getId(), userId, idempotencyKey);
+            log.info("✅ Order created: {} for user: {}", order.getId(), userId);
 
-        } catch (DataIntegrityViolationException e) {
-            log.warn("⚠️  Concurrent order creation detected for idempotency key: {}. " +
-                    "Database unique constraint prevented duplicate.", idempotencyKey);
+            // ═══════════════════════════════════════════════════════════════
+            // ⭐ STEP 6: STORE IDEMPOTENCY MAPPING (Release lock)
+            // ═══════════════════════════════════════════════════════════════
+            idempotencyService.storeOrderId(userId, idempotencyKey, order.getId());
 
-            meterRegistry.counter("orders.concurrent_duplicate_prevented").increment();
+            // ═══════════════════════════════════════════════════════════════
+            // STEP 7-9: FAULT INJECTION, EVENTS, METRICS
+            // ═══════════════════════════════════════════════════════════════
+            String faultHeader = httpServletRequest.getHeader("X-Fault");
+            if (faultHeader != null && !faultHeader.isEmpty()) {
+                simulateKafkaFailure(faultHeader, order);
+            }
 
-            Order concurrentOrder = orderRepository.findByIdempotencyKey(idempotencyKey)
-                    .orElseThrow(() -> new IllegalStateException(
-                            "Concurrent insert race condition for idempotency key: " + idempotencyKey));
-
-            throw new DuplicateOrderException(
-                    "Order created by concurrent request",
-                    concurrentOrder.getId()
+            String testScenario = extractTestScenario();
+            applicationEventPublisher.publishEvent(
+                    new OrderCreatedEvent(this, order, testScenario)
             );
+
+            meterRegistry.counter("orders.created").increment();
+
+            // ⭐ Return new order with duplicate flag = false
+            return new OrderResult(mapToResponse(order), false);
+
+        } catch (Exception e) {
+            // ═══════════════════════════════════════════════════════════════
+            // ⭐ ROLLBACK: Release lock on failure
+            // ═══════════════════════════════════════════════════════════════
+            log.error("❌ Order creation failed - releasing lock", e);
+            idempotencyService.releaseLock(userId, idempotencyKey);
+            throw e;
+        }
+    }
+
+    /**
+     * ⭐ Get order by ID with polling for race conditions
+     *
+     * When a duplicate request is detected, Redis may have the order ID
+     * before the database transaction commits. This method polls for the order
+     * to handle this race condition gracefully.
+     *
+     * @param id Order ID
+     * @return Order response
+     * @throws OrderNotFoundException if order not found after polling
+     */
+    private OrderDto.OrderResponse getOrderByIdWithPolling(UUID id) {
+        for (int attempt = 1; attempt <= MAX_POLL_ATTEMPTS; attempt++) {
+            Optional<Order> orderOpt = orderRepository.findById(id);
+
+            if (orderOpt.isPresent()) {
+                if (attempt > 1) {
+                    log.info("✅ Found order {} after {} attempts ({}ms)",
+                            id, attempt, attempt * POLL_INTERVAL_MS);
+                    meterRegistry.counter("orders.polling_succeeded",
+                            "attempts", String.valueOf(attempt)).increment();
+                }
+                return mapToResponse(orderOpt.get());
+            }
+
+            // Not found yet - might be race condition
+            if (attempt == 1) {
+                log.debug("⏳ Order {} not found immediately, polling...", id);
+            } else if (attempt % 10 == 0) {
+                log.debug("⏳ Still waiting for order {} (attempt {})", id, attempt);
+            }
+
+            try {
+                Thread.sleep(POLL_INTERVAL_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.warn("Interrupted while polling for order: {}", id);
+                break;
+            }
         }
 
-        // ═══════════════════════════════════════════════════════════════════════
-        // STEP 6: FAULT INJECTION - Simulate Kafka failures for testing
-        // ═══════════════════════════════════════════════════════════════════════
-        String faultHeader = httpServletRequest.getHeader("X-Fault");
-
-        if (faultHeader != null && !faultHeader.isEmpty()) {
-            simulateKafkaFailure(faultHeader, order);
-        }
-
-        // ═══════════════════════════════════════════════════════════════════════
-        // STEP 7: EXTRACT TEST SCENARIO HEADER
-        // ═══════════════════════════════════════════════════════════════════════
-        String testScenario = extractTestScenario();
-
-        // ═══════════════════════════════════════════════════════════════════════
-        // ⭐ STEP 8: PUBLISH DOMAIN EVENT (will trigger Kafka publishing AFTER commit)
-        // ═══════════════════════════════════════════════════════════════════════
-        log.info("🔔 Publishing OrderCreatedEvent (Kafka messages will be sent after transaction commits)");
-        applicationEventPublisher.publishEvent(
-                new OrderCreatedEvent(this, order, testScenario)
-        );
-
-        // ═══════════════════════════════════════════════════════════════════════
-        // STEP 9: UPDATE METRICS & RETURN RESPONSE
-        // ═══════════════════════════════════════════════════════════════════════
-        meterRegistry.counter("orders.created").increment();
-
-        log.info("📋 Order creation method completing - transaction will commit next");
-        log.info("   → On commit, @TransactionalEventListener will publish to Kafka");
-
-        return mapToResponse(order);
-
-        // ← TRANSACTION COMMITS HERE
-        // ↓ OrderEventPublisher.handleOrderCreated() is triggered
-        // ↓ Kafka messages are published
+        // Still not found after polling
+        log.error("❌ Order {} not found after {} attempts ({}ms)",
+                id, MAX_POLL_ATTEMPTS, MAX_POLL_ATTEMPTS * POLL_INTERVAL_MS);
+        meterRegistry.counter("orders.polling_timeout").increment();
+        throw new OrderNotFoundException("Order not found: " + id);
     }
 
     /**
      * Extract test scenario from HTTP request header
-     *
-     * This allows automated tests to control payment service behavior
-     * by passing X-Test-Scenario header with values like:
-     * - SUCCESS: Payment succeeds
-     * - FAILED: Payment fails (insufficient funds)
-     * - FRAUD: Fraud detection triggered
-     * - CARD_EXPIRED: Card expired error
-     * - TIMEOUT: Payment service doesn't respond
-     * - NETWORK_ERROR: Network error during payment
-     *
-     * @return Test scenario string or null if not present
      */
     private String extractTestScenario() {
         try {
@@ -234,15 +259,6 @@ public class OrderService {
 
     /**
      * Simulate different Kafka failure scenarios based on X-Fault header value
-     *
-     * Supported fault types:
-     * - kafka-down: Complete broker unavailability
-     * - kafka-timeout: Producer timeout waiting for broker response
-     * - kafka-retry-failure: Producer retry exhaustion
-     * - kafka-ack-failure: Insufficient in-sync replicas (ISR)
-     * - serialization-error: Message serialization failure
-     * - message-too-large: Message exceeds max.message.bytes
-     * - buffer-full: Producer buffer overflow
      */
     private void simulateKafkaFailure(String faultType, Order order) {
         log.error("🔥 FAULT INJECTION: Type='{}' for order: {}", faultType, order.getId());
@@ -296,6 +312,10 @@ public class OrderService {
         }
     }
 
+    /**
+     * Get order by ID (standard read - no polling)
+     * Use getOrderByIdWithPolling() for duplicate detection scenarios
+     */
     @Transactional(readOnly = true)
     public OrderDto.OrderResponse getOrderById(UUID id) {
         Order order = orderRepository.findById(id)
@@ -341,9 +361,6 @@ public class OrderService {
     /**
      * Handle payment result events from payment service
      * Updates order status based on payment success/failure
-     *
-     * ⭐ CRITICAL: This now works correctly because OrderEventPublisher ensures
-     * that payment requests are only sent AFTER the order transaction commits.
      */
     @KafkaListener(
             topics = "payment.result",
@@ -431,7 +448,6 @@ public class OrderService {
             log.error("❌ EXCEPTION in handlePaymentResult", e);
             log.error("   Message: {}", message);
             log.error("════════════════════════════════════════════════════════");
-            // Don't rethrow - would cause infinite retries
         }
     }
 
@@ -441,19 +457,16 @@ public class OrderService {
     private boolean isRetryable(String failureReason) {
         if (failureReason == null) return false;
 
-        // Network errors and timeouts are retryable
         if (failureReason.contains("Network error") ||
                 failureReason.contains("timeout")) {
             return true;
         }
 
-        // Fraud and card expired are NOT retryable (need new payment method)
         if (failureReason.contains("Fraud") ||
                 failureReason.contains("expired")) {
             return false;
         }
 
-        // Insufficient funds might be retryable (user could add money)
         if (failureReason.contains("Insufficient funds")) {
             return true;
         }
@@ -467,9 +480,6 @@ public class OrderService {
 
     /**
      * Publish order event to Kafka
-     * Event types: ORDER_CANCELLED, ORDER_STATUS_UPDATED
-     *
-     * Note: ORDER_CREATED is now published via OrderEventPublisher after transaction commit
      */
     private void publishOrderEvent(String eventType, Order order) {
         OrderEvent event = OrderEvent.builder()

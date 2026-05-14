@@ -104,6 +104,7 @@ spring:
             - Path=/api/users/health
           filters:
             - SetPath=/api/v1/users/health
+           # - StatusToException
             - name: CircuitBreaker          # ← ADD THIS!
               args:
                 name: userService

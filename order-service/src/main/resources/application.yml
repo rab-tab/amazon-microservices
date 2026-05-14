@@ -213,3 +213,7 @@ management:
   tracing:
     sampling:
       probability: 0.0
+
+order:
+  idempotency:
+    ttl-seconds: 86400  # 24 hours

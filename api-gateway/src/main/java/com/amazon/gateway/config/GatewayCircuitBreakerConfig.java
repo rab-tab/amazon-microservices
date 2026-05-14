@@ -1,6 +1,5 @@
 package com.amazon.gateway.config;
 
-
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.github.resilience4j.timelimiter.TimeLimiterConfig;
@@ -10,16 +9,12 @@ import org.springframework.cloud.circuitbreaker.resilience4j.Resilience4JConfigB
 import org.springframework.cloud.circuitbreaker.resilience4j.Resilience4JConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 
 import java.time.Duration;
+import java.util.concurrent.TimeoutException;
 
-/**
- * Gateway Circuit Breaker Configuration
- *
- * CRITICAL: This configures the circuit breaker to record 5xx HTTP status codes as failures.
- * Without this, CB only records exceptions, not HTTP error responses!
- */
 @Configuration
 public class GatewayCircuitBreakerConfig {
 
@@ -35,33 +30,46 @@ public class GatewayCircuitBreakerConfig {
                         new Resilience4JConfigurationProperties()
                 );
 
-        // Configure default behavior
         factory.configureDefault(id -> {
-
-            // Get base config from application.yml
             CircuitBreakerConfig baseConfig = circuitBreakerRegistry
                     .getConfiguration(id)
                     .orElseGet(() -> circuitBreakerRegistry.getDefaultConfig());
 
-            // CRITICAL: Override to record 5xx as failures
             CircuitBreakerConfig cbConfig = CircuitBreakerConfig.from(baseConfig)
                     .recordException(throwable -> {
-                        // Record WebClient 5xx responses as failures
+                        String exName = throwable.getClass().getSimpleName();
+                        System.out.println("🔴 CB [" + id + "] Recording: " + exName);
+
                         if (throwable instanceof WebClientResponseException) {
                             WebClientResponseException webEx = (WebClientResponseException) throwable;
                             boolean is5xx = webEx.getStatusCode().is5xxServerError();
-                            System.out.println("CB Recording exception: " + throwable.getClass().getName() +
-                                    " | Status: " + webEx.getStatusCode() +
-                                    " | Recording as failure: " + is5xx);
+                            System.out.println("   → Status: " + webEx.getStatusCode() + " | Failure: " + is5xx);
                             return is5xx;
                         }
-                        // Record all other exceptions
-                        System.out.println("CB Recording exception: " + throwable.getClass().getName());
+
+                        if (throwable instanceof TimeoutException) {
+                            System.out.println("   → Timeout | Failure: true");
+                            return true;
+                        }
+
+                        // CUSTOM: Our status code exception
+                        if (throwable instanceof ServiceUnavailableException) {
+                            System.out.println("   → Service Unavailable | Failure: true");
+                            return true;
+                        }
+
+                        System.out.println("   → Generic exception | Failure: true");
                         return true;
+                    })
+                    .ignoreException(throwable -> {
+                        if (throwable instanceof WebClientResponseException) {
+                            WebClientResponseException webEx = (WebClientResponseException) throwable;
+                            return webEx.getStatusCode().is4xxClientError();
+                        }
+                        return false;
                     })
                     .build();
 
-            // TimeLimiter config
             TimeLimiterConfig tlConfig = TimeLimiterConfig.custom()
                     .timeoutDuration(Duration.ofSeconds(3))
                     .cancelRunningFuture(true)
@@ -74,5 +82,19 @@ public class GatewayCircuitBreakerConfig {
         });
 
         return factory;
+    }
+
+    // Custom exception for 5xx responses
+    public static class ServiceUnavailableException extends RuntimeException {
+        private final HttpStatus status;
+
+        public ServiceUnavailableException(HttpStatus status) {
+            super("Service returned " + status);
+            this.status = status;
+        }
+
+        public HttpStatus getStatus() {
+            return status;
+        }
     }
 }

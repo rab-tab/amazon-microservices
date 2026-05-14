@@ -13,4 +13,9 @@ public class DuplicateOrderException extends RuntimeException {
         super(message);
         this.existingOrderId = existingOrderId;
     }
+
+    public DuplicateOrderException(String message,UUID existingOrderId, String idempotencyKey) {
+        super(message);
+        this.existingOrderId = existingOrderId;
+    }
 }

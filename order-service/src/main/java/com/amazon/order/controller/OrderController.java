@@ -1,7 +1,6 @@
 package com.amazon.order.controller;
 
 import com.amazon.order.dto.OrderDto;
-import com.amazon.order.exception.DuplicateOrderException;
 import com.amazon.order.service.OrderService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -31,6 +30,11 @@ public class OrderController {
      * - Network timeout causes automatic retry
      * - Load balancer retries failed requests
      *
+     * HTTP Status Codes:
+     * - 201 Created: New order was created
+     * - 200 OK: Duplicate request - returning existing order
+     * - 400 Bad Request: Invalid request data or idempotency key
+     *
      * @param request Order creation request
      * @param userId User ID from API Gateway (X-User-Id header)
      * @param idempotencyKey Optional unique key for duplicate detection (auto-generated if not provided)
@@ -39,26 +43,29 @@ public class OrderController {
     @PostMapping
     public ResponseEntity<OrderDto.OrderResponse> createOrder(
             @Valid @RequestBody OrderDto.CreateOrderRequest request,
-            @RequestHeader(value="X-User-Id",required = false) String userId,
+            @RequestHeader(value = "X-User-Id", required = false) String userId,
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
 
         log.info("Creating order for user: {} with idempotency key: {}", userId, idempotencyKey);
 
         // ═══════════════════════════════════════════════════════════════════════
-        // STEP 1: GENERATE IDEMPOTENCY KEY IF NOT PROVIDED
+        // STEP 1: VALIDATE USER ID
         // ═══════════════════════════════════════════════════════════════════════
-        if (idempotencyKey == null || idempotencyKey.isBlank()) {
-            idempotencyKey = UUID.randomUUID().toString();
-            log.debug("Auto-generated idempotency key: {}", idempotencyKey);
-        }
-        // Handle missing userId
         if (userId == null || userId.isBlank()) {
             log.error("Missing X-User-Id header");
             return ResponseEntity.badRequest().build();
         }
 
         // ═══════════════════════════════════════════════════════════════════════
-        // STEP 2: VALIDATE IDEMPOTENCY KEY FORMAT
+        // STEP 2: GENERATE IDEMPOTENCY KEY IF NOT PROVIDED
+        // ═══════════════════════════════════════════════════════════════════════
+        if (idempotencyKey == null || idempotencyKey.isBlank()) {
+            idempotencyKey = UUID.randomUUID().toString();
+            log.debug("Auto-generated idempotency key: {}", idempotencyKey);
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // STEP 3: VALIDATE IDEMPOTENCY KEY FORMAT
         // ═══════════════════════════════════════════════════════════════════════
         if (!isValidIdempotencyKey(idempotencyKey)) {
             log.warn("Invalid idempotency key format: {}", idempotencyKey);
@@ -67,33 +74,31 @@ public class OrderController {
 
         try {
             // ═══════════════════════════════════════════════════════════════════
-            // STEP 3: TRY TO CREATE NEW ORDER
+            // STEP 4: CREATE ORDER (OR RETURN EXISTING IF DUPLICATE)
             // ═══════════════════════════════════════════════════════════════════
-            OrderDto.OrderResponse order = orderService.createOrder(
+            OrderService.OrderResult result = orderService.createOrder(
                     request,
                     UUID.fromString(userId),
                     idempotencyKey
             );
 
-            log.info("✅ Order created successfully: {} for user: {}", order.getId(), userId);
-            return ResponseEntity.status(HttpStatus.CREATED).body(order);
-
-        } catch (DuplicateOrderException e) {
             // ═══════════════════════════════════════════════════════════════════
-            // STEP 4: DUPLICATE DETECTED - RETURN EXISTING ORDER
+            // STEP 5: RETURN APPROPRIATE HTTP STATUS
             // ═══════════════════════════════════════════════════════════════════
-            log.info("🔄 Duplicate order request detected for idempotency key: {}. " +
-                    "Returning existing order: {}", idempotencyKey, e.getExistingOrderId());
+            if (result.isDuplicate()) {
+                log.info("🔄 Duplicate request - returning existing order: {} with HTTP 200",
+                        result.getOrder().getId());
+                return ResponseEntity.ok(result.getOrder());
+            } else {
+                log.info("✅ New order created: {} for user: {} with HTTP 201",
+                        result.getOrder().getId(), userId);
+                return ResponseEntity.status(HttpStatus.CREATED).body(result.getOrder());
+            }
 
-            // Fetch the existing order
-            OrderDto.OrderResponse existingOrder = orderService.getOrderByIdempotencyKey(idempotencyKey);
-
-            // Return 200 OK (not 201 Created) to indicate this is an existing order
-            // Client can distinguish: 201 = new order created, 200 = duplicate detected
-            return ResponseEntity.ok(existingOrder);
-        }
-        catch (DataIntegrityViolationException e) {
-            // ✅ NEW: Caught by database constraint (race condition)
+        } catch (DataIntegrityViolationException e) {
+            // ═══════════════════════════════════════════════════════════════════
+            // RARE: Database constraint violation (race condition fallback)
+            // ═══════════════════════════════════════════════════════════════════
             log.warn("Duplicate detected by database constraint (race condition): {}", idempotencyKey);
 
             // Fetch the order that was created by the winning thread
@@ -172,6 +177,7 @@ public class OrderController {
         OrderDto.OrderResponse order = orderService.cancelOrder(orderId, UUID.fromString(userId));
         return ResponseEntity.ok(order);
     }
+
     @GetMapping("/test/echo-headers")
     public Map<String, String> echoHeaders(
             @RequestHeader Map<String, String> headers) {
