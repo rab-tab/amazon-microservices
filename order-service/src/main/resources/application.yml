@@ -23,6 +23,9 @@ spring:
       host: localhost
       port: 6379
       password: redis123
+  jackson:
+    serialization:
+      WRITE_DATES_AS_TIMESTAMPS: false
   kafka:
     bootstrap-servers: localhost:9092
     consumer:
@@ -42,6 +45,7 @@ spring:
         interceptor.classes: io.opentelemetry.instrumentation.kafkaclients.v2_6.TracingProducerInterceptor
   cache:
     type: redis
+
 
   flyway:
     enabled: true

@@ -10,7 +10,10 @@ import java.time.LocalDateTime;
 import java.util.UUID;
 
 @Entity
-@Table(name = "payments")
+@Table(name = "payments",// ✅ ADD UNIQUE CONSTRAINT on orderId
+        uniqueConstraints = {
+                @UniqueConstraint(columnNames = "order_id", name = "uk_payment_order_id")
+        })
 @Getter
 @Setter
 @Builder

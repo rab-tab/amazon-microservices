@@ -162,7 +162,6 @@ services:
       SPRING_DATA_REDIS_PASSWORD: redis123
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       SPRING_SECURITY_JWT_SECRET: local-test-jwt-secret-minimum-256-bits-required-here
-      MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: http://zipkin:9411/api/v2/spans
       # WHY JAVA_TOOL_OPTIONS? Unlike JAVA_OPTS, it's automatically read by the JVM
       # before main() starts, so Spring Boot's JarLauncher picks it up correctly.
       JAVA_TOOL_OPTIONS: "-Xms64m -Xmx256m -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Djava.security.egd=file:/dev/./urandom"

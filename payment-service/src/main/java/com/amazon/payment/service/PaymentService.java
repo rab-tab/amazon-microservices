@@ -2,17 +2,22 @@ package com.amazon.payment.service;
 
 import com.amazon.payment.entity.Payment;
 import com.amazon.payment.repository.PaymentRepository;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.support.KafkaHeaders;
+import org.springframework.messaging.handler.annotation.Header;
+import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Random;
 import java.util.UUID;
 
@@ -29,117 +34,184 @@ public class PaymentService {
     private final Random random = new Random();
 
     @KafkaListener(
-            topics = "payment.request",
+            topics = "order.events",
             groupId = "payment-service",
             containerFactory = "kafkaListenerContainerFactory"
     )
     @Transactional
-    public void processPaymentRequest(String message) {
+    public void consumeOrderEvent(
+            @Payload String eventJson,
+            @Header(KafkaHeaders.RECEIVED_KEY) String key,
+            @Header(KafkaHeaders.RECEIVED_TOPIC) String topic,
+            @Header(KafkaHeaders.RECEIVED_PARTITION) int partition,
+            @Header(KafkaHeaders.OFFSET) long offset) {
 
         log.info("════════════════════════════════════════════════════════");
-        log.info("📨 KAFKA MESSAGE RECEIVED!");
-        log.info("   Raw Message: {}", message);
+        log.info("📥 KAFKA EVENT RECEIVED from order.events");
+        log.info("   Topic: {}, Partition: {}, Offset: {}", topic, partition, offset);
+        log.info("   Key: {}", key);
+        log.info("   Raw JSON: {}", eventJson);
 
         try {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> request = objectMapper.readValue(message, Map.class);
-
-            String orderId = (String) request.get("orderId");
-            String userId = (String) request.get("userId");
-            Object amountObj = request.get("amount");
-
             // ═══════════════════════════════════════════════════════════
-            // ⭐ CHECK FOR TEST SCENARIO FLAG
+            // STEP 1: Parse JSON
             // ═══════════════════════════════════════════════════════════
-            String testScenario = (String) request.get("testScenario");
-
-            if (testScenario != null && !testScenario.isBlank()) {
-                log.info("🧪 TEST SCENARIO DETECTED: {}", testScenario);
-                handleTestScenario(orderId, userId, amountObj, testScenario);
-                log.info("════════════════════════════════════════════════════════");
-                return;
+            JsonNode eventNode;
+            try {
+                eventNode = objectMapper.readTree(eventJson);
+            } catch (Exception e) {
+                log.error("❌ JSON PARSING FAILED - Invalid JSON format");
+                log.error("   Raw content: {}", eventJson);
+                log.error("   Error: {}", e.getMessage());
+                throw new IllegalArgumentException("Malformed JSON: " + e.getMessage(), e);
             }
 
-            // ═══════════════════════════════════════════════════════════
-            // NORMAL PAYMENT PROCESSING (no test scenario)
-            // ═══════════════════════════════════════════════════════════
+            String eventType = eventNode.path("eventType").asText();
 
-            BigDecimal amount;
-            if (amountObj instanceof Number) {
-                amount = BigDecimal.valueOf(((Number) amountObj).doubleValue());
+            if (eventType.isEmpty()) {
+                log.error("❌ Missing required field: eventType");
+                throw new IllegalArgumentException("Missing required field: eventType");
+            }
+
+            log.info("   Event Type: {}", eventType);
+
+            // ═══════════════════════════════════════════════════════════
+            // STEP 2: Route based on event type
+            // ═══════════════════════════════════════════════════════════
+            if ("ORDER_CREATED".equals(eventType)) {
+                processOrderCreatedEvent(eventNode);
             } else {
-                amount = new BigDecimal(amountObj.toString());
+                log.info("   ℹ️  Ignoring event type: {}", eventType);
             }
 
-            log.info("✅ Parsed successfully");
-            log.info("   Order ID: {}", orderId);
-            log.info("   User ID: {}", userId);
-            log.info("   Amount: {}", amount);
-
-            Payment payment = Payment.builder()
-                    .orderId(UUID.fromString(orderId))
-                    .userId(UUID.fromString(userId))
-                    .amount(amount)
-                    .status(Payment.PaymentStatus.PROCESSING)
-                    .paymentMethod(Payment.PaymentMethod.CREDIT_CARD)
-                    .build();
-
-            payment = paymentRepository.save(payment);
-            log.info("💳 Payment created: {}", payment.getId());
-
-            // Simulate payment (90% success)
-            boolean success = random.nextDouble() > 0.1;
-
-            if (success) {
-                payment.setStatus(Payment.PaymentStatus.SUCCESS);
-                payment.setTransactionId("TXN-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
-                log.info("✅ Payment SUCCESS");
-            } else {
-                payment.setStatus(Payment.PaymentStatus.FAILED);
-                payment.setFailureReason("Insufficient funds");
-                log.warn("❌ Payment FAILED");
-            }
-
-            payment = paymentRepository.save(payment);
-            log.info("💾 Status saved: {}", payment.getStatus());
-
-            publishPaymentResult(payment);
-
+            log.info("✅ Event processed successfully");
             log.info("════════════════════════════════════════════════════════");
 
+        } catch (IllegalArgumentException e) {
+            log.error("❌ Event validation failed - will be sent to DLQ");
+            log.error("════════════════════════════════════════════════════════");
+            throw e;
+
         } catch (Exception e) {
+            log.error("❌ Business logic error processing event: {}", e.getMessage(), e);
             log.error("════════════════════════════════════════════════════════");
-            log.error("❌ EXCEPTION in processPaymentRequest");
-            log.error("   Message: {}", message);
-            log.error("   Error: ", e);
-            log.error("════════════════════════════════════════════════════════");
-            throw new RuntimeException("Failed to process payment", e);
         }
     }
 
     /**
-     * ⭐ NEW: Handle test scenarios for automated testing
-     *
-     * Supported scenarios:
-     * - SUCCESS: Payment succeeds
-     * - FAILED / INSUFFICIENT_FUNDS: Payment fails due to insufficient funds
-     * - FRAUD: Payment blocked due to fraud detection
-     * - CARD_EXPIRED: Payment fails due to expired card
-     * - NETWORK_ERROR: Payment fails due to network issues
-     * - TIMEOUT: No response (simulates timeout)
+     * Process ORDER_CREATED event with IDEMPOTENCY check
      */
-    private void handleTestScenario(String orderId, String userId, Object amountObj, String scenario) {
-        BigDecimal amount;
-        if (amountObj instanceof Number) {
-            amount = BigDecimal.valueOf(((Number) amountObj).doubleValue());
-        } else {
-            amount = new BigDecimal(amountObj.toString());
+    private void processOrderCreatedEvent(JsonNode eventNode) {
+        String orderId = eventNode.path("orderId").asText();
+        String userId = eventNode.path("userId").asText();
+
+        if (orderId.isEmpty() || userId.isEmpty()) {
+            log.error("❌ Missing required fields: orderId or userId");
+            throw new IllegalArgumentException("Missing required fields");
         }
 
+        // ✅ Extract amount - handle BOTH "amount" and "totalAmount"
+        // ═══════════════════════════════════════════════════════════════
+        BigDecimal amount = null;
+
+        // Try "amount" first (used in test events published directly to Kafka)
+        if (eventNode.has("amount") && eventNode.path("amount").isNumber()) {
+            amount = BigDecimal.valueOf(eventNode.path("amount").asDouble());
+            log.info("   Amount extracted from 'amount' field: {}", amount);
+        }
+        // Try "totalAmount" (used by Order Service)
+        else if (eventNode.has("totalAmount") && eventNode.path("totalAmount").isNumber()) {
+            amount = BigDecimal.valueOf(eventNode.path("totalAmount").asDouble());
+            log.info("   Amount extracted from 'totalAmount' field: {}", amount);
+        }
+
+        // If neither exists, throw error
+        if (amount == null) {
+            log.error("❌ Missing or invalid amount field");
+            log.error("   Event has 'amount': {}", eventNode.has("amount"));
+            log.error("   Event has 'totalAmount': {}", eventNode.has("totalAmount"));
+            log.error("   Full event: {}", eventNode.toPrettyString());
+            throw new IllegalArgumentException("Missing required field: amount or totalAmount");
+        }
+
+        log.info("   Processing ORDER_CREATED:");
+        log.info("     Order ID: {}", orderId);
+        log.info("     User ID: {}", userId);
+        log.info("     Amount: {}", amount);
+        // ═══════════════════════════════════════════════════════════════
+        // ✅ IDEMPOTENCY CHECK: Does payment already exist for this order?
+        // ═══════════════════════════════════════════════════════════════
+        UUID orderUuid = UUID.fromString(orderId);
+        Optional<Payment> existingPayment = paymentRepository.findByOrderId(orderUuid);
+
+        if (existingPayment.isPresent()) {
+            Payment existing = existingPayment.get();
+            log.warn("⚠️  DUPLICATE EVENT DETECTED - Payment already exists!");
+            log.warn("   Order ID: {}", orderId);
+            log.warn("   Existing Payment ID: {}", existing.getId());
+            log.warn("   Existing Payment Status: {}", existing.getStatus());
+            log.warn("   Skipping duplicate processing (IDEMPOTENT)");
+
+            // ✅ Re-publish payment result (in case original publish failed)
+            publishPaymentResult(existing);
+
+            return;  // ← Skip processing, return early
+        }
+
+        log.info("   ✓ No existing payment found - proceeding with payment processing");
+
+        // Check for test scenario
+        String testScenario = eventNode.path("testScenario").asText();
+        if (!testScenario.isEmpty()) {
+            log.info("🧪 TEST SCENARIO: {}", testScenario);
+            handleTestScenario(orderId, userId, amount, testScenario);
+            return;
+        }
+
+        // Normal payment processing
+        processPayment(orderId, userId, amount);
+    }
+
+    /**
+     * Process actual payment
+     */
+    private void processPayment(String orderId, String userId, BigDecimal amount) {
+        Payment payment = Payment.builder()
+                .orderId(UUID.fromString(orderId))
+                .userId(UUID.fromString(userId))
+                .amount(amount)
+                .status(Payment.PaymentStatus.PROCESSING)
+                .paymentMethod(Payment.PaymentMethod.CREDIT_CARD)
+                .build();
+
+        payment = paymentRepository.save(payment);
+        log.info("💳 Payment created: {}", payment.getId());
+
+        // Simulate payment (90% success)
+        boolean success = random.nextDouble() > 0.1;
+
+        if (success) {
+            payment.setStatus(Payment.PaymentStatus.SUCCESS);
+            payment.setTransactionId("TXN-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
+            log.info("✅ Payment SUCCESS");
+        } else {
+            payment.setStatus(Payment.PaymentStatus.FAILED);
+            payment.setFailureReason("Insufficient funds");
+            log.warn("❌ Payment FAILED");
+        }
+
+        payment = paymentRepository.save(payment);
+        log.info("💾 Status saved: {}", payment.getStatus());
+
+        publishPaymentResult(payment);
+    }
+
+    private void handleTestScenario(String orderId, String userId, BigDecimal amount, String scenario) {
         Map<String, Object> result = new HashMap<>();
         result.put("orderId", orderId);
         result.put("paymentId", UUID.randomUUID().toString());
         result.put("amount", amount);
+        result.put("timestamp", System.currentTimeMillis());
 
         switch (scenario.toUpperCase()) {
             case "FAILED":
@@ -147,40 +219,12 @@ public class PaymentService {
                 result.put("status", "FAILED");
                 result.put("transactionId", "");
                 result.put("failureReason", "Insufficient funds");
-                log.info("🧪 Simulating: FAILED payment (Insufficient funds)");
-                publishTestResult(orderId, result);
-                break;
-
-            case "FRAUD":
-                result.put("status", "FAILED");
-                result.put("transactionId", "");
-                result.put("failureReason", "Fraud detected");
-                result.put("fraudScore", 95);
-                log.info("🧪 Simulating: FRAUD detection");
-                publishTestResult(orderId, result);
-                break;
-
-            case "CARD_EXPIRED":
-                result.put("status", "FAILED");
-                result.put("transactionId", "");
-                result.put("failureReason", "Card expired");
-                log.info("🧪 Simulating: CARD_EXPIRED");
-                publishTestResult(orderId, result);
-                break;
-
-            case "NETWORK_ERROR":
-                result.put("status", "FAILED");
-                result.put("transactionId", "");
-                result.put("failureReason", "Network error - please retry");
-                log.info("🧪 Simulating: NETWORK_ERROR");
+                log.info("🧪 Simulating: FAILED payment");
                 publishTestResult(orderId, result);
                 break;
 
             case "TIMEOUT":
-                // Don't publish any result - simulate timeout
-                log.info("🧪 Simulating: TIMEOUT - no result will be published");
-                log.info("   Order {} will not receive payment confirmation", orderId);
-                // Intentionally do nothing - no Kafka message published
+                log.info("🧪 Simulating: TIMEOUT - no result published");
                 break;
 
             case "SUCCESS":
@@ -193,9 +237,6 @@ public class PaymentService {
         }
     }
 
-    /**
-     * Publish payment result (normal production flow)
-     */
     private void publishPaymentResult(Payment payment) {
         log.info("📤 Publishing to payment.result...");
 
@@ -205,6 +246,7 @@ public class PaymentService {
         result.put("status", payment.getStatus() == Payment.PaymentStatus.SUCCESS ? "SUCCESS" : "FAILED");
         result.put("amount", payment.getAmount());
         result.put("transactionId", payment.getTransactionId() != null ? payment.getTransactionId() : "");
+        result.put("timestamp", System.currentTimeMillis());
 
         if (payment.getStatus() == Payment.PaymentStatus.FAILED) {
             result.put("failureReason", payment.getFailureReason());
@@ -213,17 +255,11 @@ public class PaymentService {
         publishToKafka(payment.getOrderId().toString(), result);
     }
 
-    /**
-     * ⭐ NEW: Publish test result
-     */
     private void publishTestResult(String orderId, Map<String, Object> result) {
         log.info("📤 Publishing TEST result to payment.result...");
         publishToKafka(orderId, result);
     }
 
-    /**
-     * Common Kafka publishing logic
-     */
     private void publishToKafka(String orderId, Map<String, Object> result) {
         try {
             kafkaTemplate.send(PAYMENT_RESULT_TOPIC, orderId, result)
@@ -231,10 +267,9 @@ public class PaymentService {
                         if (exception != null) {
                             log.error("❌ Publish FAILED", exception);
                         } else {
-                            log.info("✅ Published successfully to payment.result");
+                            log.info("✅ Published to payment.result");
                         }
                     });
-
         } catch (Exception e) {
             log.error("❌ Exception publishing", e);
         }

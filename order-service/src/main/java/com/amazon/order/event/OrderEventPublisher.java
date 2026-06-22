@@ -6,6 +6,7 @@
     import com.amazon.order.event.OrderEvent;
     import lombok.RequiredArgsConstructor;
     import lombok.extern.slf4j.Slf4j;
+    import org.springframework.context.event.EventListener;
     import org.springframework.kafka.core.KafkaTemplate;
     import org.springframework.stereotype.Component;
     import org.springframework.transaction.event.TransactionalEventListener;
@@ -51,7 +52,8 @@
          *
          * If the transaction rolls back, this method is NOT called.
          */
-        @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+        //@TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+        @EventListener
         public void handleOrderCreated(OrderCreatedEvent event) {
             Order order = event.getOrder();
             String testScenario = event.getTestScenario();

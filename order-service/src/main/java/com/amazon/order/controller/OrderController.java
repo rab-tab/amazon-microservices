@@ -10,6 +10,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.LocalDateTime;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 
@@ -21,70 +23,101 @@ public class OrderController {
 
     private final OrderService orderService;
 
-    /**
-     * Create a new order with idempotency support
-     *
-     * Idempotency ensures duplicate requests return the same order instead of creating duplicates.
-     * This prevents double-charging customers when:
-     * - User clicks submit button twice
-     * - Network timeout causes automatic retry
-     * - Load balancer retries failed requests
-     *
-     * HTTP Status Codes:
-     * - 201 Created: New order was created
-     * - 200 OK: Duplicate request - returning existing order
-     * - 400 Bad Request: Invalid request data or idempotency key
-     *
-     * @param request Order creation request
-     * @param userId User ID from API Gateway (X-User-Id header)
-     * @param idempotencyKey Optional unique key for duplicate detection (auto-generated if not provided)
-     * @return 201 Created with new order, or 200 OK with existing order for duplicates
-     */
+    // ═══════════════════════════════════════════════════════════════════════════
+    // TEST ENDPOINTS
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @GetMapping("/test/exception-test")
+    public ResponseEntity<?> testException() {
+        log.info("Test exception endpoint called");
+
+        Map<String, Object> errorResponse = new LinkedHashMap<>();
+        errorResponse.put("timestamp", LocalDateTime.now());
+        errorResponse.put("status", HttpStatus.INTERNAL_SERVER_ERROR.value());
+        errorResponse.put("error", "Kafka Unavailable");
+        errorResponse.put("message", "Test exception from controller");
+        errorResponse.put("details", "Unable to publish order event. Please try again later.");
+
+        return ResponseEntity
+                .status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .body(errorResponse);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // CREATE ORDER
+    // ═══════════════════════════════════════════════════════════════════════════
+
     @PostMapping
-    public ResponseEntity<OrderDto.OrderResponse> createOrder(
+    public ResponseEntity<?> createOrder(
             @Valid @RequestBody OrderDto.CreateOrderRequest request,
             @RequestHeader(value = "X-User-Id", required = false) String userId,
-            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @RequestHeader(value = "X-Fault", required = false) String faultType) {
+
+        if (faultType != null) {
+            log.warn("🔥 FAULT INJECTION ENABLED: {}", faultType);
+        }
 
         log.info("Creating order for user: {} with idempotency key: {}", userId, idempotencyKey);
 
-        // ═══════════════════════════════════════════════════════════════════════
-        // STEP 1: VALIDATE USER ID
-        // ═══════════════════════════════════════════════════════════════════════
+        // ═══════════════════════════════════════════════════════════════
+        // VALIDATE USER ID
+        // ═══════════════════════════════════════════════════════════════
         if (userId == null || userId.isBlank()) {
             log.error("Missing X-User-Id header");
             return ResponseEntity.badRequest().build();
         }
 
-        // ═══════════════════════════════════════════════════════════════════════
-        // STEP 2: GENERATE IDEMPOTENCY KEY IF NOT PROVIDED
-        // ═══════════════════════════════════════════════════════════════════════
+        // ═══════════════════════════════════════════════════════════════
+        // GENERATE IDEMPOTENCY KEY IF NOT PROVIDED
+        // ═══════════════════════════════════════════════════════════════
         if (idempotencyKey == null || idempotencyKey.isBlank()) {
             idempotencyKey = UUID.randomUUID().toString();
             log.debug("Auto-generated idempotency key: {}", idempotencyKey);
         }
 
-        // ═══════════════════════════════════════════════════════════════════════
-        // STEP 3: VALIDATE IDEMPOTENCY KEY FORMAT
-        // ═══════════════════════════════════════════════════════════════════════
+        // ═══════════════════════════════════════════════════════════════
+        // VALIDATE IDEMPOTENCY KEY FORMAT
+        // ═══════════════════════════════════════════════════════════════
         if (!isValidIdempotencyKey(idempotencyKey)) {
             log.warn("Invalid idempotency key format: {}", idempotencyKey);
             return ResponseEntity.badRequest().build();
         }
 
+        // ═══════════════════════════════════════════════════════════════
+        // ⭐ FAULT INJECTION TYPE 1: PRODUCER FAILURES (Kafka Publishing)
+        // These faults prevent order creation entirely - HTTP 500 returned
+        // Order is NOT created, NOT saved to DB
+        // ═══════════════════════════════════════════════════════════════
+        if (isProducerFault(faultType)) {
+            log.error("🔥 PRODUCER FAULT INJECTION: {} - Returning error without creating order", faultType);
+
+            Map<String, Object> errorResponse = new LinkedHashMap<>();
+            errorResponse.put("timestamp", LocalDateTime.now());
+            errorResponse.put("status", HttpStatus.INTERNAL_SERVER_ERROR.value());
+            errorResponse.put("error", "Kafka Unavailable");
+            errorResponse.put("message", getFaultMessage(faultType));
+            errorResponse.put("details", "Unable to publish order event. Please try again later.");
+
+            return ResponseEntity
+                    .status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(errorResponse);
+        }
+
         try {
-            // ═══════════════════════════════════════════════════════════════════
-            // STEP 4: CREATE ORDER (OR RETURN EXISTING IF DUPLICATE)
-            // ═══════════════════════════════════════════════════════════════════
+            // ═══════════════════════════════════════════════════════════════
+            // ⭐ FAULT INJECTION TYPE 2: PAYMENT SAGA FAILURES
+            // These faults are passed through to Payment Service via Kafka
+            // Order IS created and saved, but payment will fail
+            // Enables testing Saga compensation patterns
+            // ═══════════════════════════════════════════════════════════════
             OrderService.OrderResult result = orderService.createOrder(
                     request,
                     UUID.fromString(userId),
-                    idempotencyKey
+                    idempotencyKey,
+                    faultType  // ⭐ Pass payment faults to service (will be ignored if producer fault)
             );
 
-            // ═══════════════════════════════════════════════════════════════════
-            // STEP 5: RETURN APPROPRIATE HTTP STATUS
-            // ═══════════════════════════════════════════════════════════════════
             if (result.isDuplicate()) {
                 log.info("🔄 Duplicate request - returning existing order: {} with HTTP 200",
                         result.getOrder().getId());
@@ -96,91 +129,164 @@ public class OrderController {
             }
 
         } catch (DataIntegrityViolationException e) {
-            // ═══════════════════════════════════════════════════════════════════
-            // RARE: Database constraint violation (race condition fallback)
-            // ═══════════════════════════════════════════════════════════════════
             log.warn("Duplicate detected by database constraint (race condition): {}", idempotencyKey);
-
-            // Fetch the order that was created by the winning thread
-            OrderDto.OrderResponse existingOrder =
-                    orderService.getOrderByIdempotencyKey(idempotencyKey);
-
+            OrderDto.OrderResponse existingOrder = orderService.getOrderByIdempotencyKey(idempotencyKey);
             return ResponseEntity.ok(existingOrder);
+
+        } catch (Exception e) {
+            log.error("❌ Unexpected exception in createOrder", e);
+
+            Map<String, Object> errorResponse = new LinkedHashMap<>();
+            errorResponse.put("timestamp", LocalDateTime.now());
+            errorResponse.put("status", HttpStatus.INTERNAL_SERVER_ERROR.value());
+            errorResponse.put("error", "Internal Server Error");
+            errorResponse.put("message", "An unexpected error occurred: " + e.getMessage());
+
+            return ResponseEntity
+                    .status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(errorResponse);
         }
     }
 
     /**
+     * ⭐ Determine if fault is a producer-side failure
+     *
+     * Producer faults:
+     * - Prevent order creation entirely
+     * - Return HTTP 500 before calling service
+     * - Used to test Kafka publishing failures
+     *
+     * Payment faults:
+     * - Allow order creation
+     * - Get passed to Payment Service via Kafka
+     * - Used to test Saga compensation patterns
+     */
+    private boolean isProducerFault(String faultType) {
+        if (faultType == null || faultType.isBlank()) {
+            return false;
+        }
+
+        return switch (faultType.toLowerCase()) {
+            case "kafka-down",
+                    "kafka-timeout",
+                    "kafka-retry-failure",
+                    "kafka-ack-failure",
+                    "serialization-error",
+                    "message-too-large",
+                    "buffer-full",
+                    "quota-exceeded",
+                    "batch-too-large",
+                    "compression-error",
+                    "schema-registry-down" -> true;
+            default -> false;  // ⭐ Payment faults (payment-failure, payment-fraud, etc.) fall through
+        };
+    }
+
+    /**
+     * Get fault injection message based on fault type
+     */
+    private String getFaultMessage(String faultType) {
+        return switch (faultType.toLowerCase()) {
+            case "kafka-down" -> "Simulated Kafka failure - broker unreachable";
+            case "kafka-timeout" -> "Simulated Kafka timeout - producer timed out";
+            case "kafka-retry-failure" -> "Simulated retry failure - max retries exceeded";
+            case "kafka-ack-failure" -> "Simulated ack failure - insufficient in-sync replicas";
+            case "serialization-error" -> "Simulated serialization error - cannot serialize event";
+            case "message-too-large" -> "Simulated message too large - event exceeds max.message.bytes";
+            case "buffer-full" -> "Simulated buffer full - producer buffer overflow";
+            case "quota-exceeded" -> "Simulated quota exceeded - producer exceeded quota limit";
+            case "batch-too-large" -> "Simulated batch too large - batch exceeds batch.max.size";
+            case "compression-error" -> "Simulated compression error - failed to compress message";
+            case "schema-registry-down" -> "Simulated schema registry down - unable to validate schema";
+            default -> "Simulated Kafka failure";
+        };
+    }
+
+    /**
      * Validate idempotency key format
-     *
-     * Requirements:
-     * - Not null or blank
-     * - Length: 8-256 characters
-     * - Characters: alphanumeric and hyphens only (a-z, A-Z, 0-9, -)
-     *
-     * Valid examples:
-     * - "550e8400-e29b-41d4-a716-446655440000" (UUID)
-     * - "order-2024-12345"
-     * - "client-request-abc123"
-     *
-     * Invalid examples:
-     * - "abc" (too short)
-     * - "key with spaces" (contains spaces)
-     * - "key@special#chars" (special characters not allowed)
-     *
-     * @param key Idempotency key to validate
-     * @return true if valid, false otherwise
      */
     private boolean isValidIdempotencyKey(String key) {
         if (key == null || key.isBlank()) {
             return false;
         }
-
-        // UUID format or alphanumeric with hyphens, 8-256 chars
         return key.matches("^[a-zA-Z0-9-]{8,256}$");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // OTHER EXISTING ENDPOINTS (unchanged)
+    // GET ORDER BY ID
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /**
-     * Get order by ID
-     */
-    @GetMapping("/{orderId}")
-    public ResponseEntity<OrderDto.OrderResponse> getOrder(
-            @PathVariable UUID orderId,
-            @RequestHeader("X-User-Id") String userId) {
-        OrderDto.OrderResponse order = orderService.getOrderById(orderId);
+    @GetMapping("/{id}")
+    public ResponseEntity<OrderDto.OrderResponse> getOrderById(
+            @PathVariable UUID id,
+            @RequestHeader(value = "X-User-Id", required = false) String userId) {
+
+        log.info("Fetching order: {} for user: {}", id, userId);
+
+        if (userId == null || userId.isBlank()) {
+            log.error("Missing X-User-Id header");
+            return ResponseEntity.badRequest().build();
+        }
+
+        OrderDto.OrderResponse order = orderService.getOrderById(id);
+
+        // Verify ownership
+        if (!order.getUserId().equals(UUID.fromString(userId))) {
+            log.warn("User {} attempted to access order {} owned by {}",
+                    userId, id, order.getUserId());
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
+
         return ResponseEntity.ok(order);
     }
 
-    /**
-     * Get user's orders with pagination
-     */
+    // ═══════════════════════════════════════════════════════════════════════════
+    // GET USER ORDERS (PAGINATED)
+    // ═══════════════════════════════════════════════════════════════════════════
+
     @GetMapping
     public ResponseEntity<OrderDto.PagedOrderResponse> getUserOrders(
-            @RequestHeader("X-User-Id") String userId,
+            @RequestHeader(value = "X-User-Id", required = false) String userId,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "10") int size) {
+
+        log.info("Fetching orders for user: {} (page: {}, size: {})", userId, page, size);
+
+        if (userId == null || userId.isBlank()) {
+            log.error("Missing X-User-Id header");
+            return ResponseEntity.badRequest().build();
+        }
+
         OrderDto.PagedOrderResponse orders = orderService.getUserOrders(
-                UUID.fromString(userId), page, size);
+                UUID.fromString(userId),
+                page,
+                size
+        );
+
         return ResponseEntity.ok(orders);
     }
 
-    /**
-     * Cancel order
-     */
-    @DeleteMapping("/{orderId}")
-    public ResponseEntity<OrderDto.OrderResponse> cancelOrder(
-            @PathVariable UUID orderId,
-            @RequestHeader("X-User-Id") String userId) {
-        OrderDto.OrderResponse order = orderService.cancelOrder(orderId, UUID.fromString(userId));
-        return ResponseEntity.ok(order);
-    }
+    // ═══════════════════════════════════════════════════════════════════════════
+    // CANCEL ORDER
+    // ═══════════════════════════════════════════════════════════════════════════
 
-    @GetMapping("/test/echo-headers")
-    public Map<String, String> echoHeaders(
-            @RequestHeader Map<String, String> headers) {
-        return headers;
+    @DeleteMapping("/{id}")
+    public ResponseEntity<OrderDto.OrderResponse> cancelOrder(
+            @PathVariable UUID id,
+            @RequestHeader(value = "X-User-Id", required = false) String userId) {
+
+        log.info("Cancelling order: {} for user: {}", id, userId);
+
+        if (userId == null || userId.isBlank()) {
+            log.error("Missing X-User-Id header");
+            return ResponseEntity.badRequest().build();
+        }
+
+        OrderDto.OrderResponse cancelledOrder = orderService.cancelOrder(
+                id,
+                UUID.fromString(userId)
+        );
+
+        return ResponseEntity.ok(cancelledOrder);
     }
 }

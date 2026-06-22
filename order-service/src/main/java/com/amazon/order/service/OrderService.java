@@ -5,7 +5,6 @@ import com.amazon.order.entity.Order;
 import com.amazon.order.entity.OrderItem;
 import com.amazon.order.event.OrderCreatedEvent;
 import com.amazon.order.event.OrderEvent;
-import com.amazon.order.exception.KafkaPublishException;
 import com.amazon.order.exception.OrderNotFoundException;
 import com.amazon.order.exception.OrderStateException;
 import com.amazon.order.repository.OrderRepository;
@@ -22,6 +21,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
@@ -34,7 +34,6 @@ import java.util.UUID;
 @Service
 @RequiredArgsConstructor
 @Slf4j
-@Transactional
 public class OrderService {
 
     private final OrderRepository orderRepository;
@@ -46,14 +45,9 @@ public class OrderService {
     private final OrderIdempotencyService idempotencyService;
 
     private static final String ORDER_EVENTS_TOPIC = "order.events";
-    private static final String PAYMENT_REQUEST_TOPIC = "payment.request";
-    private static final int MAX_POLL_ATTEMPTS = 50;  // 50 * 100ms = 5 seconds
+    private static final int MAX_POLL_ATTEMPTS = 50;
     private static final long POLL_INTERVAL_MS = 100;
 
-    /**
-     * Result wrapper for order creation
-     * Contains the order and a flag indicating if it was a duplicate request
-     */
     @Getter
     @AllArgsConstructor
     public static class OrderResult {
@@ -64,48 +58,41 @@ public class OrderService {
     /**
      * Create a new order and publish events to Kafka
      *
-     * ⭐ IMPORTANT: Uses transactional event publishing to prevent race conditions
-     * Events are published AFTER the transaction commits, ensuring the order
-     * exists in the database before Kafka consumers process it.
-     *
-     * Supports fault injection via X-Fault header for testing
-     * Supports idempotency via idempotencyKey parameter
-     * Supports test scenarios via X-Test-Scenario header
+     * ⭐ IMPORTANT: NO @Transactional annotation on this method
+     * Fault injection is handled in the controller layer BEFORE this is called
+     * This ensures clean exception propagation without transaction interference
      *
      * @param request Order creation request
      * @param userId User ID from gateway
      * @param idempotencyKey Unique key for duplicate detection
+     * @param faultType Payment fault type for Saga testing (producer faults handled in controller)
      * @return OrderResult containing the order and duplicate flag
      */
     public OrderResult createOrder(
             OrderDto.CreateOrderRequest request,
             UUID userId,
-            String idempotencyKey) {
+            String idempotencyKey,
+            String faultType) {
 
         log.info("Creating order for user: {} with idempotency key: {}", userId, idempotencyKey);
 
         // ═══════════════════════════════════════════════════════════════
-        // ⭐ STEP 1: CHECK IDEMPOTENCY (Redis + DB + Lock)
+        // CHECK IDEMPOTENCY
         // ═══════════════════════════════════════════════════════════════
         String existingOrderId = idempotencyService.checkAndAcquire(userId, idempotencyKey);
 
         if (existingOrderId != null) {
             log.info("🔄 Duplicate request detected - returning existing order: {}", existingOrderId);
             meterRegistry.counter("orders.duplicate_detected").increment();
-
-            // ⭐ Return existing order with duplicate flag = true
             OrderDto.OrderResponse existingOrder = getOrderByIdWithPolling(UUID.fromString(existingOrderId));
             return new OrderResult(existingOrder, true);
         }
 
         log.info("✅ New order request - lock acquired, proceeding with creation");
 
-        // Lock acquired - proceed with order creation
-        Order order = null;
-
         try {
             // ═══════════════════════════════════════════════════════════════
-            // STEP 2-4: BUILD ORDER
+            // BUILD ORDER
             // ═══════════════════════════════════════════════════════════════
             List<OrderItem> items = request.getItems().stream()
                     .map(itemReq -> OrderItem.builder()
@@ -122,7 +109,7 @@ public class OrderService {
                     .map(OrderItem::getTotalPrice)
                     .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-            order = Order.builder()
+            Order order = Order.builder()
                     .userId(userId)
                     .idempotencyKey(idempotencyKey)
                     .items(items)
@@ -133,37 +120,32 @@ public class OrderService {
                     .build();
 
             // ═══════════════════════════════════════════════════════════════
-            // STEP 5: SAVE ORDER
+            // SAVE ORDER (in isolated transaction)
             // ═══════════════════════════════════════════════════════════════
-            order = orderRepository.save(order);
+            order = saveOrderInTransaction(order);
             log.info("✅ Order created: {} for user: {}", order.getId(), userId);
 
             // ═══════════════════════════════════════════════════════════════
-            // ⭐ STEP 6: STORE IDEMPOTENCY MAPPING (Release lock)
+            // STORE IDEMPOTENCY MAPPING (Release lock)
             // ═══════════════════════════════════════════════════════════════
             idempotencyService.storeOrderId(userId, idempotencyKey, order.getId());
 
             // ═══════════════════════════════════════════════════════════════
-            // STEP 7-9: FAULT INJECTION, EVENTS, METRICS
+            // PUBLISH EVENTS
+            // Extracts payment test scenario from faultType parameter
             // ═══════════════════════════════════════════════════════════════
-            String faultHeader = httpServletRequest.getHeader("X-Fault");
-            if (faultHeader != null && !faultHeader.isEmpty()) {
-                simulateKafkaFailure(faultHeader, order);
-            }
-
-            String testScenario = extractTestScenario();
+            String testScenario = extractTestScenario(faultType);
             applicationEventPublisher.publishEvent(
                     new OrderCreatedEvent(this, order, testScenario)
             );
 
             meterRegistry.counter("orders.created").increment();
 
-            // ⭐ Return new order with duplicate flag = false
             return new OrderResult(mapToResponse(order), false);
 
         } catch (Exception e) {
             // ═══════════════════════════════════════════════════════════════
-            // ⭐ ROLLBACK: Release lock on failure
+            // ROLLBACK: Release lock on failure
             // ═══════════════════════════════════════════════════════════════
             log.error("❌ Order creation failed - releasing lock", e);
             idempotencyService.releaseLock(userId, idempotencyKey);
@@ -172,16 +154,21 @@ public class OrderService {
     }
 
     /**
-     * ⭐ Get order by ID with polling for race conditions
-     *
-     * When a duplicate request is detected, Redis may have the order ID
-     * before the database transaction commits. This method polls for the order
-     * to handle this race condition gracefully.
-     *
-     * @param id Order ID
-     * @return Order response
-     * @throws OrderNotFoundException if order not found after polling
+     * Save order in an isolated transaction
+     * Uses REQUIRES_NEW propagation to ensure transaction completes
+     * before returning to the caller
      */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    private Order saveOrderInTransaction(Order order) {
+        Order saved = orderRepository.save(order);
+        orderRepository.flush();  // Force immediate write
+        return saved;
+    }
+
+    /**
+     * Get order by ID with polling for race conditions
+     */
+    @Transactional(readOnly = true)
     private OrderDto.OrderResponse getOrderByIdWithPolling(UUID id) {
         for (int attempt = 1; attempt <= MAX_POLL_ATTEMPTS; attempt++) {
             Optional<Order> orderOpt = orderRepository.findById(id);
@@ -196,7 +183,6 @@ public class OrderService {
                 return mapToResponse(orderOpt.get());
             }
 
-            // Not found yet - might be race condition
             if (attempt == 1) {
                 log.debug("⏳ Order {} not found immediately, polling...", id);
             } else if (attempt % 10 == 0) {
@@ -212,7 +198,6 @@ public class OrderService {
             }
         }
 
-        // Still not found after polling
         log.error("❌ Order {} not found after {} attempts ({}ms)",
                 id, MAX_POLL_ATTEMPTS, MAX_POLL_ATTEMPTS * POLL_INTERVAL_MS);
         meterRegistry.counter("orders.polling_timeout").increment();
@@ -220,15 +205,47 @@ public class OrderService {
     }
 
     /**
-     * Extract test scenario from HTTP request header
+     * ⭐ Extract test scenario from fault injection header
+     *
+     * Maps HTTP fault types to Payment Service test scenarios:
+     * - payment-failure → INSUFFICIENT_FUNDS
+     * - payment-fraud → FRAUD
+     * - payment-expired-card → CARD_EXPIRED
+     * - payment-network-error → NETWORK_ERROR
+     * - payment-timeout → TIMEOUT
+     * - payment-success → SUCCESS
+     *
+     * Producer faults (kafka-down, etc.) are handled in the controller
+     * and never reach this method.
      */
-    private String extractTestScenario() {
+    private String extractTestScenario(String faultType) {
+        // Priority 1: Map fault type to payment test scenario
+        if (faultType != null && !faultType.isBlank()) {
+            String scenario = switch (faultType.toLowerCase()) {
+                case "payment-failure", "insufficient-funds" -> "INSUFFICIENT_FUNDS";
+                case "payment-fraud", "fraud" -> "FRAUD";
+                case "payment-expired-card", "card-expired" -> "CARD_EXPIRED";
+                case "payment-network-error", "network-error" -> "NETWORK_ERROR";
+                case "payment-timeout", "timeout" -> "TIMEOUT";
+                case "payment-success" -> "SUCCESS";
+                default -> null;  // Not a payment fault (could be producer fault handled in controller)
+            };
+
+            if (scenario != null) {
+                log.info("🧪 Mapped payment fault '{}' to test scenario '{}'", faultType, scenario);
+                meterRegistry.counter("orders.payment_test_scenario",
+                        "scenario", scenario).increment();
+                return scenario;
+            }
+        }
+
+        // Priority 2: X-Test-Scenario header (backward compatibility)
         try {
             String testScenario = httpServletRequest.getHeader("X-Test-Scenario");
-
             if (testScenario != null && !testScenario.isBlank()) {
-                log.info("🧪 Test scenario detected in request: {}", testScenario);
-                meterRegistry.counter("orders.test_scenario_used", "scenario", testScenario).increment();
+                log.info("🧪 Test scenario from header: {}", testScenario);
+                meterRegistry.counter("orders.test_scenario_used",
+                        "scenario", testScenario).increment();
                 return testScenario;
             }
         } catch (Exception e) {
@@ -238,84 +255,15 @@ public class OrderService {
         return null;
     }
 
-    /**
-     * Get existing order by idempotency key
-     * Used when duplicate order request is detected
-     *
-     * @param idempotencyKey Idempotency key
-     * @return Order response
-     * @throws OrderNotFoundException if order not found
-     */
     @Transactional(readOnly = true)
     public OrderDto.OrderResponse getOrderByIdempotencyKey(String idempotencyKey) {
         log.debug("Fetching order by idempotency key: {}", idempotencyKey);
-
         Order order = orderRepository.findByIdempotencyKey(idempotencyKey)
                 .orElseThrow(() -> new OrderNotFoundException(
                         "Order not found for idempotency key: " + idempotencyKey));
-
         return mapToResponse(order);
     }
 
-    /**
-     * Simulate different Kafka failure scenarios based on X-Fault header value
-     */
-    private void simulateKafkaFailure(String faultType, Order order) {
-        log.error("🔥 FAULT INJECTION: Type='{}' for order: {}", faultType, order.getId());
-
-        meterRegistry.counter("orders.kafka_failure_simulated", "type", faultType).increment();
-
-        switch (faultType) {
-            case "kafka-down":
-                throw new KafkaPublishException(
-                        "Simulated Kafka failure - broker unreachable for order: " + order.getId()
-                );
-
-            case "kafka-timeout":
-                try {
-                    log.warn("Simulating producer timeout delay...");
-                    Thread.sleep(100);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-                throw new KafkaPublishException(
-                        "Simulated Kafka timeout - producer timed out for order: " + order.getId()
-                );
-
-            case "kafka-retry-failure":
-                throw new KafkaPublishException(
-                        "Simulated retry failure - max retries exceeded for order: " + order.getId()
-                );
-
-            case "kafka-ack-failure":
-                throw new KafkaPublishException(
-                        "Simulated ack failure - insufficient in-sync replicas for order: " + order.getId()
-                );
-
-            case "serialization-error":
-                throw new KafkaPublishException(
-                        "Simulated serialization error - cannot serialize event for order: " + order.getId()
-                );
-
-            case "message-too-large":
-                throw new KafkaPublishException(
-                        "Simulated message too large - event exceeds max.message.bytes for order: " + order.getId()
-                );
-
-            case "buffer-full":
-                throw new KafkaPublishException(
-                        "Simulated buffer full - producer buffer overflow for order: " + order.getId()
-                );
-
-            default:
-                log.warn("⚠️  Unknown fault injection type: '{}' - ignoring", faultType);
-        }
-    }
-
-    /**
-     * Get order by ID (standard read - no polling)
-     * Use getOrderByIdWithPolling() for duplicate detection scenarios
-     */
     @Transactional(readOnly = true)
     public OrderDto.OrderResponse getOrderById(UUID id) {
         Order order = orderRepository.findById(id)
@@ -335,6 +283,7 @@ public class OrderService {
                 .build();
     }
 
+    @Transactional
     public OrderDto.OrderResponse cancelOrder(UUID orderId, UUID userId) {
         Order order = orderRepository.findById(orderId)
                 .orElseThrow(() -> new OrderNotFoundException("Order not found: " + orderId));
@@ -358,10 +307,6 @@ public class OrderService {
     // KAFKA LISTENER - Payment Result (Saga Pattern)
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /**
-     * Handle payment result events from payment service
-     * Updates order status based on payment success/failure
-     */
     @KafkaListener(
             topics = "payment.result",
             groupId = "order-service",
@@ -391,7 +336,6 @@ public class OrderService {
                 return;
             }
 
-            // Convert fraudScore safely
             Integer fraudScore = null;
             if (fraudScoreObj != null) {
                 fraudScore = (fraudScoreObj instanceof Integer)
@@ -399,27 +343,23 @@ public class OrderService {
                         : Integer.parseInt(fraudScoreObj.toString());
             }
 
-            // Find order
             log.info("🔍 Looking up order: {}", orderId);
             Optional<Order> orderOpt = orderRepository.findById(UUID.fromString(orderId));
 
             if (orderOpt.isEmpty()) {
                 log.error("❌ ORDER NOT FOUND: {}", orderId);
-                log.error("   This should NOT happen if transactional events are working correctly!");
                 return;
             }
 
             Order order = orderOpt.get();
             log.info("✅ Found order - Current status: {}", order.getStatus());
 
-            // Update order based on payment status
             if ("SUCCESS".equals(paymentStatus)) {
                 log.info("💳 Processing SUCCESS payment");
                 order.setStatus(Order.OrderStatus.CONFIRMED);
                 order.setPaymentId(UUID.fromString(paymentId));
                 order.setPaymentTransactionId(transactionId);
                 meterRegistry.counter("orders.confirmed").increment();
-
             } else {
                 log.info("💳 Processing FAILED payment - Reason: {}", failureReason);
                 order.setStatus(Order.OrderStatus.PAYMENT_FAILED);
@@ -430,15 +370,10 @@ public class OrderService {
                         "reason", failureReason != null ? failureReason : "unknown").increment();
             }
 
-            // Save order
             log.info("💾 Saving order with new status: {}", order.getStatus());
             Order savedOrder = orderRepository.save(order);
-            log.info("✅ Order saved successfully!");
-            log.info("   Order ID: {}", savedOrder.getId());
-            log.info("   New Status: {}", savedOrder.getStatus());
-            log.info("   Payment Failure Reason: {}", savedOrder.getPaymentFailureReason());
+            log.info("✅ Order saved successfully - Status: {}", savedOrder.getStatus());
 
-            // Publish event
             publishOrderEvent("ORDER_STATUS_UPDATED", savedOrder);
             log.info("📤 ORDER_STATUS_UPDATED event published");
             log.info("════════════════════════════════════════════════════════");
@@ -451,36 +386,20 @@ public class OrderService {
         }
     }
 
-    /**
-     * Determine if payment failure is retryable
-     */
     private boolean isRetryable(String failureReason) {
         if (failureReason == null) return false;
-
-        if (failureReason.contains("Network error") ||
-                failureReason.contains("timeout")) {
+        if (failureReason.contains("Network error") || failureReason.contains("timeout")) {
             return true;
         }
-
-        if (failureReason.contains("Fraud") ||
-                failureReason.contains("expired")) {
+        if (failureReason.contains("Fraud") || failureReason.contains("expired")) {
             return false;
         }
-
         if (failureReason.contains("Insufficient funds")) {
             return true;
         }
-
         return false;
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // PRIVATE HELPER METHODS
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    /**
-     * Publish order event to Kafka
-     */
     private void publishOrderEvent(String eventType, Order order) {
         OrderEvent event = OrderEvent.builder()
                 .eventType(eventType)
@@ -503,9 +422,6 @@ public class OrderService {
         log.info("📤 Published {} event for order: {}", eventType, order.getId());
     }
 
-    /**
-     * Map Order entity to OrderResponse DTO
-     */
     private OrderDto.OrderResponse mapToResponse(Order order) {
         List<OrderDto.OrderItemResponse> itemResponses = order.getItems().stream()
                 .map(item -> OrderDto.OrderItemResponse.builder()

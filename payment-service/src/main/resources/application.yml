@@ -39,6 +39,10 @@ spring:
       properties:
         # ✅ ADD TRACING INTERCEPTOR
         interceptor.classes: io.opentelemetry.instrumentation.kafkaclients.v2_6.TracingProducerInterceptor
+        # ✅ ADD DLQ CONFIGURATION
+    listener:
+    # Type can be: record, batch
+      type: single
   cache:
     type: redis
 
