@@ -153,7 +153,7 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/users_db
       MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: http://zipkin:9411/api/v2/spans
       SPRING_JPA_OPEN_IN_VIEW: "false"
-      SPRING_MAIN_LAZY_INITIALIZATION: "true"
+      SPRING_MAIN_LAZY_INITIALIZATION: "false"
       SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: "3"
       SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE: "1"
       SPRING_DATASOURCE_USERNAME: amazon
@@ -288,7 +288,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
-      start_period: 600s
+      start_period: 120s
 
   notification-service:
     image: rabtab/amazon-notification-service:${TAG_NOTIFICATION_SERVICE:-latest}
