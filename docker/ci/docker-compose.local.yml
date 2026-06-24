@@ -122,7 +122,10 @@ services:
     networks:
       - test-net
     healthcheck:
-      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      test: [
+        "CMD-SHELL",
+        "kafka-topics --bootstrap-server kafka:29092 --list >/dev/null 2>&1"
+      ]
       interval: 10s
       timeout: 10s
       retries: 15
