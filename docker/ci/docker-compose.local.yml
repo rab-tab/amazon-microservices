@@ -125,7 +125,8 @@ services:
     healthcheck:
       test: [
         "CMD-SHELL",
-        "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"
+        #"kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"
+        "bash -c '</dev/tcp/localhost/9092'"
       ]
       interval: 10s
       timeout: 10s
