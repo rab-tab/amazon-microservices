@@ -4,6 +4,8 @@ server:
 spring:
   application:
     name: order-service
+  main:
+    application-startup=buffering
   datasource:
     url: jdbc:postgresql://localhost:5432/orders_db
     username: amazon
@@ -110,7 +112,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,prometheus,metrics,circuitbreakers,ratelimiters,retries
+        include: health,info,prometheus,metrics,circuitbreakers,ratelimiters,retries,startup
   health:
     circuitbreakers:
       enabled: true
