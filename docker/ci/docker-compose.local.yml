@@ -96,7 +96,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "echo ruok | nc localhost 2181 | grep imok"
+          "echo ruok | timeout 5 bash -c 'exec 3<>/dev/tcp/localhost/2181; cat >&3; cat <&3' | grep imok"
         ]
       interval: 10s
       timeout: 5s
@@ -136,8 +136,8 @@ services:
     healthcheck:
       test: [
         "CMD-SHELL",
-        #"kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"
-        "bash -c '</dev/tcp/localhost/9092'"
+        "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"
+        #"bash -c '</dev/tcp/localhost/9092'"
       ]
       interval: 10s
       timeout: 10s
