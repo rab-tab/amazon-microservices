@@ -16,6 +16,7 @@ import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.kafka.annotation.KafkaListener;
@@ -122,9 +123,16 @@ public class OrderService {
             // ═══════════════════════════════════════════════════════════════
             // SAVE ORDER (in isolated transaction)
             // ═══════════════════════════════════════════════════════════════
-            order = saveOrderInTransaction(order);
-            log.info("✅ Order created: {} for user: {}", order.getId(), userId);
-
+            try {
+                order = saveOrderInTransaction(order);
+                log.info("✅ Order created: {} for user: {}", order.getId(), userId);
+            } catch (DataIntegrityViolationException e) {
+                // Lost the race — someone else already created this order (TTL expired mid-flight)
+                log.warn("Unique constraint hit for user={}, key={} — fetching existing order", userId, idempotencyKey);
+                Order existing = orderRepository.findByUserIdAndIdempotencyKey(userId, idempotencyKey)
+                        .orElseThrow(() -> e); // shouldn't happen, but fail loudly if it does
+                return new OrderResult(mapToResponse(existing), true);
+            }
             // ═══════════════════════════════════════════════════════════════
             // STORE IDEMPOTENCY MAPPING (Release lock)
             // ═══════════════════════════════════════════════════════════════
