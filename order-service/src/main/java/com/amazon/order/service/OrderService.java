@@ -156,8 +156,14 @@ public class OrderService {
             // ROLLBACK: Release lock on failure
             // ═══════════════════════════════════════════════════════════════
             log.error("❌ Order creation failed - releasing lock", e);
-            idempotencyService.releaseLock(userId, idempotencyKey);
+            try {
+                idempotencyService.releaseLock(userId, idempotencyKey);
+            } catch (Exception lockReleaseError) {
+                log.error("Failed to release lock during cleanup — it will expire via TTL", lockReleaseError);
+                // deliberately swallow this — don't let it hide the real problem below
+            }
             throw e;
+
         }
     }
 
