@@ -4,8 +4,6 @@ server:
 spring:
   application:
     name: order-service
-  main:
-    application-startup=buffering
   datasource:
     url: jdbc:postgresql://localhost:5432/orders_db
     username: amazon
