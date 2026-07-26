@@ -4,8 +4,6 @@ server:
 spring:
   application:
     name: user-service
-  main:
-    application-startup=buffering
   datasource:
     url: jdbc:postgresql://localhost:5432/users_db?currentSchema=user_service
     username: amazon
