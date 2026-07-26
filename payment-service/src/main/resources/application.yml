@@ -3,8 +3,6 @@ server:
 spring:
   application:
     name: payment-service
-  main:
-    application-startup=buffering
   datasource:
     url: jdbc:postgresql://localhost:5432/payments_db
     username: amazon
