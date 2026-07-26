@@ -9,7 +9,7 @@ spring:
       expiration: 86400000
 
   main:
-    application-startup=buffering
+    application-startup : buffering
 
   redis:
     host: localhost
