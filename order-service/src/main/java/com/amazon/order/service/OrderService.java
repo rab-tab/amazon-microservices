@@ -313,7 +313,7 @@ public class OrderService {
 
         order.setStatus(Order.OrderStatus.CANCELLED);
         order = orderRepository.save(order);
-        publishOrderEvent("ORDER_CANCELLED", order);
+        publishOrderEvent("ORDER_CANCELLED", order,null);
         return mapToResponse(order);
     }
 
@@ -388,7 +388,7 @@ public class OrderService {
             Order savedOrder = orderRepository.save(order);
             log.info("✅ Order saved successfully - Status: {}", savedOrder.getStatus());
 
-            publishOrderEvent("ORDER_STATUS_UPDATED", savedOrder);
+            publishOrderEvent("ORDER_STATUS_UPDATED", savedOrder,null);
             log.info("📤 ORDER_STATUS_UPDATED event published");
             log.info("════════════════════════════════════════════════════════");
 
@@ -414,7 +414,7 @@ public class OrderService {
         return false;
     }
 
-    private void publishOrderEvent(String eventType, Order order) {
+    private void publishOrderEvent(String eventType, Order order,String testScenario) {
         OrderEvent event = OrderEvent.builder()
                 .eventType(eventType)
                 .orderId(order.getId())
@@ -423,6 +423,7 @@ public class OrderService {
                 .status(order.getStatus())
                 .shippingAddress(order.getShippingAddress())
                 .timestamp(LocalDateTime.now())
+                .testScenario(testScenario)
                 .items(order.getItems().stream()
                         .map(item -> OrderEvent.OrderItemEvent.builder()
                                 .productId(item.getProductId())

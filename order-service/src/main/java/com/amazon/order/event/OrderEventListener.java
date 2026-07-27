@@ -64,6 +64,7 @@ public class OrderEventListener {
                     .status(order.getStatus())
                     .shippingAddress(order.getShippingAddress())
                     .timestamp(LocalDateTime.now())
+                    .testScenario(testScenario)
                     .items(order.getItems().stream()
                             .map(item -> OrderEvent.OrderItemEvent.builder()
                                     .productId(item.getProductId())

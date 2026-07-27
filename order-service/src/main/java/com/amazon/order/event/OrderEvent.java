@@ -22,6 +22,7 @@ public class OrderEvent {
     private List<OrderItemEvent> items;
     private String shippingAddress;
     private LocalDateTime timestamp;
+    private String testScenario;
 
     @Getter
     @Setter

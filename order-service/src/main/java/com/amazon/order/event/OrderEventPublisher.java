@@ -1,4 +1,4 @@
-    package com.amazon.order.service;
+    package com.amazon.order.event;
 
     import com.amazon.order.entity.Order;
     import com.amazon.order.entity.OrderItem;
@@ -67,7 +67,7 @@
 
             try {
                 // Publish order created event (for audit, notifications, etc.)
-                publishOrderCreatedEvent(order);
+                publishOrderCreatedEvent(order,null);
 
                 // Publish payment request to Payment Service
                 publishPaymentRequest(order, testScenario);
@@ -95,7 +95,7 @@
          * Publish ORDER_CREATED event to order.events topic
          * Used for audit trail, notifications, downstream services, etc.
          */
-        private void publishOrderCreatedEvent(Order order) {
+        private void publishOrderCreatedEvent(Order order,String testScenario) {
             OrderEvent event = OrderEvent.builder()
                     .eventType("ORDER_CREATED")
                     .orderId(order.getId())
@@ -104,6 +104,7 @@
                     .status(order.getStatus())
                     .shippingAddress(order.getShippingAddress())
                     .timestamp(LocalDateTime.now())
+                    .testScenario(testScenario)
                     .items(order.getItems().stream()
                             .map(item -> OrderEvent.OrderItemEvent.builder()
                                     .productId(item.getProductId())
