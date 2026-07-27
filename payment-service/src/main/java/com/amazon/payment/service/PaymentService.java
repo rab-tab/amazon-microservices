@@ -219,9 +219,39 @@ public class PaymentService {
                 result.put("status", "FAILED");
                 result.put("transactionId", "");
                 result.put("failureReason", "Insufficient funds");
+                result.put("retryable", true);
                 log.info("🧪 Simulating: FAILED payment");
                 publishTestResult(orderId, result);
                 break;
+
+            case "FRAUD":
+                result.put("status", "FAILED");
+                result.put("transactionId", "");
+                result.put("failureReason", "Fraud detected");
+                result.put("retryable", false);
+                result.put("fraudScore", 95);
+                log.info("🧪 Simulating: FAILED payment (fraud detected)");
+                publishTestResult(orderId, result);
+                break;
+
+            case "CARD_EXPIRED":
+                result.put("status", "FAILED");
+                result.put("transactionId", "");
+                result.put("failureReason", "Card expired");
+                result.put("retryable", false);
+                log.info("🧪 Simulating: FAILED payment (card expired)");
+                publishTestResult(orderId, result);
+                break;
+
+            case "NETWORK_ERROR":
+                result.put("status", "FAILED");
+                result.put("transactionId", "");
+                result.put("failureReason", "Network error occurred while processing payment");
+                result.put("retryable", true);
+                log.info("🧪 Simulating: FAILED payment (network error)");
+                publishTestResult(orderId, result);
+                break;
+
 
             case "TIMEOUT":
                 log.info("🧪 Simulating: TIMEOUT - no result published");
