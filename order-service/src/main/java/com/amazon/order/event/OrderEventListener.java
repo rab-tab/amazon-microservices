@@ -41,6 +41,7 @@ public class OrderEventListener {
      */
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     public void handleOrderCreated(OrderCreatedEvent event) {
+        log.error("🔥🔥🔥 OrderEventListener.handleOrderCreated WAS CALLED 🔥🔥🔥");
         Order order = event.getOrder();
         String testScenario = event.getTestScenario();
 

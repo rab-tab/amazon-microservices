@@ -67,7 +67,7 @@
 
             try {
                 // Publish order created event (for audit, notifications, etc.)
-                publishOrderCreatedEvent(order,null);
+                publishOrderCreatedEvent(order,testScenario);
 
                 // Publish payment request to Payment Service
                 publishPaymentRequest(order, testScenario);

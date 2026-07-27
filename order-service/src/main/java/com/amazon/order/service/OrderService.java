@@ -143,6 +143,8 @@ public class OrderService {
             // Extracts payment test scenario from faultType parameter
             // ═══════════════════════════════════════════════════════════════
             String testScenario = extractTestScenario(faultType);
+            log.info("🔍 DEBUG: extractTestScenario returned: {}", testScenario);  // temporary
+
             applicationEventPublisher.publishEvent(
                     new OrderCreatedEvent(this, order, testScenario)
             );
