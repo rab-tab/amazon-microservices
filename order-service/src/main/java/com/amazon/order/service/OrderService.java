@@ -15,12 +15,16 @@ import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.hibernate.StaleObjectStateException;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
+import org.springframework.retry.annotation.Backoff;
+import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -299,6 +303,11 @@ public class OrderService {
                 .build();
     }
 
+    @Retryable(
+            retryFor = {ObjectOptimisticLockingFailureException.class, StaleObjectStateException.class},
+            maxAttempts = 3,
+            backoff = @Backoff(delay = 100, multiplier = 2)
+    )
     @Transactional
     public OrderDto.OrderResponse cancelOrder(UUID orderId, UUID userId) {
         Order order = orderRepository.findById(orderId)
@@ -308,6 +317,13 @@ public class OrderService {
             throw new SecurityException("Not authorized to cancel this order");
         }
 
+        // Idempotent no-op: order already cancelled — treat as success, not an error.
+        // Prevents duplicate/retried cancel requests from failing or double-publishing.
+        if (order.getStatus() == Order.OrderStatus.CANCELLED) {
+            log.info("Order {} already CANCELLED — idempotent no-op", orderId);
+            return mapToResponse(order);
+        }
+
         if (order.getStatus() != Order.OrderStatus.PENDING &&
                 order.getStatus() != Order.OrderStatus.CONFIRMED) {
             throw new OrderStateException("Order cannot be cancelled in status: " + order.getStatus());
@@ -315,10 +331,9 @@ public class OrderService {
 
         order.setStatus(Order.OrderStatus.CANCELLED);
         order = orderRepository.save(order);
-        publishOrderEvent("ORDER_CANCELLED", order,null);
+        publishOrderEvent("ORDER_CANCELLED", order, null);
         return mapToResponse(order);
     }
-
     // ═══════════════════════════════════════════════════════════════════════════
     // KAFKA LISTENER - Payment Result (Saga Pattern)
     // ═══════════════════════════════════════════════════════════════════════════
