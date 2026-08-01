@@ -1,0 +1,31 @@
+version: 0.2
+
+# Expects these environment variable overrides at build-start time:
+#   SERVICE_NAME   e.g. "user-service"
+#   IMAGE_TAG      e.g. the git commit SHA
+#   ECR_REGISTRY   e.g. "978185568053.dkr.ecr.us-east-1.amazonaws.com"
+#   ARTIFACT_S3_URI  e.g. "s3://amazon-microservices-build-artifacts-978185568053/builds/<tag>/<service>/"
+#
+# Source for this build is the amazon-microservices GitHub repo (so Dockerfiles
+# are present); the jar itself is pulled from S3 since Jenkins already built it.
+
+phases:
+  pre_build:
+    commands:
+      - echo "Logging in to ECR..."
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+      - echo "Fetching built jar for $SERVICE_NAME from S3..."
+      - mkdir -p $SERVICE_NAME/target
+      - aws s3 cp $ARTIFACT_S3_URI $SERVICE_NAME/target/ --recursive
+
+  build:
+    commands:
+      - echo "Building Docker image for $SERVICE_NAME..."
+      - docker build -t $ECR_REGISTRY/amazon-$SERVICE_NAME:$IMAGE_TAG -t $ECR_REGISTRY/amazon-$SERVICE_NAME:latest ./$SERVICE_NAME
+
+  post_build:
+    commands:
+      - echo "Pushing images to ECR..."
+      - docker push $ECR_REGISTRY/amazon-$SERVICE_NAME:$IMAGE_TAG
+      - docker push $ECR_REGISTRY/amazon-$SERVICE_NAME:latest
+      - echo "✅ Pushed amazon-$SERVICE_NAME:$IMAGE_TAG"

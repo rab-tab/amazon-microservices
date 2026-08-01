@@ -25,6 +25,8 @@ pipeline {
         ECR_REGISTRY   = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
         PROJECT        = "amazon"
         MAVEN_OPTS     = "-Xmx256m -XX:+UseG1GC"
+        S3_BUCKET      = "amazon-microservices-build-artifacts-978185568053"
+        CODEBUILD_PROJECT = "amazon-microservices-docker-build"
     }
 
     stages {
@@ -149,50 +151,11 @@ Services to build:
             } // end parallel
         }
 
-        // ── Stage 3: Docker Build ────────────────────────────────
-        // Images tagged as: <ECR_REGISTRY>/amazon-user-service:abc12345
-        // Sequential builds — parallel would OOM on 8GB Mac
-        stage('Docker Build') {
-            steps {
-                script {
-                    def services = [
-                        [name: 'user-service',         build: env.BUILD_USER_SERVICE],
-                        [name: 'product-service',      build: env.BUILD_PRODUCT_SERVICE],
-                        [name: 'order-service',        build: env.BUILD_ORDER_SERVICE],
-                        [name: 'payment-service',      build: env.BUILD_PAYMENT_SERVICE],
-                        [name: 'notification-service', build: env.BUILD_NOTIFICATION],
-                        [name: 'api-gateway',          build: env.BUILD_GATEWAY],
-                    ]
-
-                    services.each { svc ->
-                        if (svc.build == 'true') {
-                            def imageName = "${ECR_REGISTRY}/${PROJECT}-${svc.name}"
-                            echo "🐳 Building: ${imageName}:${IMAGE_TAG}"
-                            sh """
-                                docker build \
-                                  -t ${imageName}:${IMAGE_TAG} \
-                                  -t ${imageName}:latest \
-                                  ./${svc.name}
-
-                                docker image ls ${imageName}:${IMAGE_TAG} \
-                                  --format "  {{.Repository}}:{{.Tag}} → {{.Size}}"
-                            """
-                        } else {
-                            echo "⏭️  Skipping ${svc.name} (no changes)"
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── Stage 4: Push to ECR ──────────────────────────────────
-        // Authenticates using the jenkins-ecr IAM user's keys (stored in
-        // Jenkins as an "AWS Credentials" entry, id: aws-ecr-creds), pushes
-        // all built images, then logs out immediately (never leave the
-        // Docker credential store holding a live auth token).
-        // Note: the ECR token from get-login-password is only valid 12h,
-        // so this re-authenticates on every run rather than caching it.
-        stage('Push to ECR') {
+        // ── Stage 3: Upload Build Artifacts to S3 ─────────────────
+        // CodeBuild runs in AWS and can't see this Jenkins workspace directly,
+        // so the built jars are handed off via S3. CodeBuild's buildspec pulls
+        // them back down before running `docker build`.
+        stage('Upload Artifacts to S3') {
             steps {
                 script {
                     def services = [
@@ -208,37 +171,100 @@ Services to build:
                         $class: 'AmazonWebServicesCredentialsBinding',
                         credentialsId: 'aws-ecr-creds'
                     ]]) {
-                        sh """
-                            aws ecr get-login-password --region ${AWS_REGION} | \
-                              docker login --username AWS --password-stdin ${ECR_REGISTRY}
-                        """
-
-                        def pushed = 0
                         services.each { svc ->
                             if (svc.build == 'true') {
-                                def imageName = "${ECR_REGISTRY}/${PROJECT}-${svc.name}"
-                                sh """
-                                    docker push ${imageName}:${IMAGE_TAG}
-                                    docker push ${imageName}:latest
-                                    echo "✅ Pushed ${imageName}:${IMAGE_TAG}"
-                                """
-                                pushed++
+                                def s3Path = "s3://${S3_BUCKET}/builds/${IMAGE_TAG}/${svc.name}/"
+                                echo "📤 Uploading ${svc.name} jar to ${s3Path}"
+                                sh "aws s3 cp ${svc.name}/target/ ${s3Path} --recursive --exclude '*' --include '*.jar'"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Stage 4: Build & Push via CodeBuild ───────────────────
+        // Triggers one CodeBuild run per changed service, in parallel — CodeBuild
+        // runs on its own managed compute, so there's no laptop-memory reason to
+        // serialize these the way the old local `docker build` stage had to.
+        // Each build's status is polled until it finishes; any failure fails
+        // this stage (and the pipeline) so the QA trigger below never fires on
+        // a broken image.
+        stage('Build & Push via CodeBuild') {
+            steps {
+                script {
+                    def services = [
+                        [name: 'user-service',         build: env.BUILD_USER_SERVICE],
+                        [name: 'product-service',      build: env.BUILD_PRODUCT_SERVICE],
+                        [name: 'order-service',        build: env.BUILD_ORDER_SERVICE],
+                        [name: 'payment-service',      build: env.BUILD_PAYMENT_SERVICE],
+                        [name: 'notification-service', build: env.BUILD_NOTIFICATION],
+                        [name: 'api-gateway',          build: env.BUILD_GATEWAY],
+                    ]
+
+                    def toBuild = services.findAll { it.build == 'true' }
+
+                    if (toBuild.isEmpty()) {
+                        env.IMAGES_PUSHED = 'false'
+                        echo "⏭️  No services changed — CodeBuild will be skipped"
+                        return
+                    }
+
+                    withCredentials([[
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-ecr-creds'
+                    ]]) {
+                        def buildTasks = [:]
+
+                        toBuild.each { svc ->
+                            def s = svc.name  // capture for closure
+                            buildTasks[s] = {
+                                def s3Uri = "s3://${S3_BUCKET}/builds/${IMAGE_TAG}/${s}/"
+                                echo "🚀 Starting CodeBuild for ${s}"
+
+                                def buildId = sh(
+                                    script: """
+                                        aws codebuild start-build \
+                                          --project-name ${CODEBUILD_PROJECT} \
+                                          --environment-variables-override \
+                                            name=SERVICE_NAME,value=${s},type=PLAINTEXT \
+                                            name=IMAGE_TAG,value=${IMAGE_TAG},type=PLAINTEXT \
+                                            name=ECR_REGISTRY,value=${ECR_REGISTRY},type=PLAINTEXT \
+                                            name=ARTIFACT_S3_URI,value=${s3Uri},type=PLAINTEXT \
+                                          --query 'build.id' --output text
+                                    """,
+                                    returnStdout: true
+                                ).trim()
+
+                                echo "⏳ ${s}: CodeBuild running (${buildId})"
+
+                                def status = 'IN_PROGRESS'
+                                def elapsed = 0
+                                def timeoutSecs = 900  // 15 min per service is generous headroom
+
+                                while (status == 'IN_PROGRESS' && elapsed < timeoutSecs) {
+                                    sleep(15)
+                                    elapsed += 15
+                                    status = sh(
+                                        script: "aws codebuild batch-get-builds --ids ${buildId} --query 'builds[0].buildStatus' --output text",
+                                        returnStdout: true
+                                    ).trim()
+                                    echo "  ${s}: ${status} (${elapsed}s)"
+                                }
+
+                                if (status != 'SUCCEEDED') {
+                                    error("❌ CodeBuild for ${s} ended with status: ${status} (build id: ${buildId})")
+                                }
+                                echo "✅ ${s}: CodeBuild succeeded"
                             }
                         }
 
-                        if (pushed > 0) {
-                            env.IMAGES_PUSHED = 'true'
-                            echo "📦 ${pushed} image(s) pushed — QA pipeline will be triggered"
-                        } else {
-                            env.IMAGES_PUSHED = 'false'
-                            echo "⏭️  No images pushed — QA pipeline will be skipped"
-                        }
-
-                        sh "docker logout ${ECR_REGISTRY}"
+                        parallel buildTasks
                     }
 
+                    env.IMAGES_PUSHED = 'true'
                     echo """
-Images pushed to ECR:
+Images pushed to ECR via CodeBuild:
   ${ECR_REGISTRY}/${PROJECT}-<service>
   Tag: ${IMAGE_TAG}
 """
