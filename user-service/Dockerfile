@@ -7,11 +7,8 @@ FROM eclipse-temurin:21-jre-alpine AS builder
 
 WORKDIR /app
 
-# Deterministic artifact (override per service if needed)
-ARG JAR_FILE=target/last-service.jar
-
-# Copy only the required JAR (no wildcard)
-COPY ${JAR_FILE} app.jar
+# Copy the built jar (wildcard — works regardless of exact artifact name/version)
+COPY target/*.jar app.jar
 
 # Extract layers and remove JAR in same layer (prevents duplication)
 RUN java -Djarmode=layertools -jar app.jar extract \
