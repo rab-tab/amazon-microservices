@@ -1,6 +1,6 @@
 // ════════════════════════════════════════════════════════════════
 // Dev Pipeline — amazon-microservices
-// Pushes images to Docker Hub: rabtab/amazon-<service>:<git-sha>
+// Pushes images to ECR: <account-id>.dkr.ecr.<region>.amazonaws.com/amazon-<service>:<git-sha>
 // ════════════════════════════════════════════════════════════════
 
 pipeline {
@@ -19,10 +19,12 @@ pipeline {
     }
 
     environment {
-        IMAGE_TAG    = "${env.GIT_COMMIT?.take(8) ?: 'dev'}"
-        DOCKERHUB_USER = "rabtab"
-        PROJECT      = "amazon"
-        MAVEN_OPTS   = "-Xmx256m -XX:+UseG1GC"
+        IMAGE_TAG      = "${env.GIT_COMMIT?.take(8) ?: 'dev'}"
+        AWS_REGION     = "us-east-1"                 // match the region ECR repos were created in
+        AWS_ACCOUNT_ID = "978185568053"               // ⚠️ replace with your actual account ID
+        ECR_REGISTRY   = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        PROJECT        = "amazon"
+        MAVEN_OPTS     = "-Xmx256m -XX:+UseG1GC"
     }
 
     stages {
@@ -37,7 +39,6 @@ pipeline {
                         returnStdout: true
                     ).trim()
 
-                    // If empty (first commit) or no previous commit, build everything
                     def buildAll = !changedFiles || changedFiles.isEmpty() || changedFiles == 'ALL'
                     if (buildAll) changedFiles = 'ALL'
 
@@ -149,7 +150,7 @@ Services to build:
         }
 
         // ── Stage 3: Docker Build ────────────────────────────────
-        // Images tagged as: rabtab/amazon-user-service:abc12345
+        // Images tagged as: <ECR_REGISTRY>/amazon-user-service:abc12345
         // Sequential builds — parallel would OOM on 8GB Mac
         stage('Docker Build') {
             steps {
@@ -165,7 +166,7 @@ Services to build:
 
                     services.each { svc ->
                         if (svc.build == 'true') {
-                            def imageName = "${DOCKERHUB_USER}/${PROJECT}-${svc.name}"
+                            def imageName = "${ECR_REGISTRY}/${PROJECT}-${svc.name}"
                             echo "🐳 Building: ${imageName}:${IMAGE_TAG}"
                             sh """
                                 docker build \
@@ -184,10 +185,14 @@ Services to build:
             }
         }
 
-        // ── Stage 4: Push to Docker Hub ──────────────────────────
-        // Logs in with stored credential, pushes all built images,
-        // then logs out immediately (never leave credentials active)
-        stage('Push to Docker Hub') {
+        // ── Stage 4: Push to ECR ──────────────────────────────────
+        // Authenticates using the jenkins-ecr IAM user's keys (stored in
+        // Jenkins as an "AWS Credentials" entry, id: aws-ecr-creds), pushes
+        // all built images, then logs out immediately (never leave the
+        // Docker credential store holding a live auth token).
+        // Note: the ECR token from get-login-password is only valid 12h,
+        // so this re-authenticates on every run rather than caching it.
+        stage('Push to ECR') {
             steps {
                 script {
                     def services = [
@@ -199,19 +204,19 @@ Services to build:
                         [name: 'api-gateway',          build: env.BUILD_GATEWAY],
                     ]
 
-                    // withCredentials injects username+password safely
-                    // They are masked in logs — you will never see the actual token
-                    withCredentials([usernamePassword(
-                        credentialsId: 'dockerhub-creds',
-                        usernameVariable: 'DOCKER_USER',
-                        passwordVariable: 'DOCKER_PASS'
-                    )]) {
-                        sh 'echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin'
+                    withCredentials([[
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-ecr-creds'
+                    ]]) {
+                        sh """
+                            aws ecr get-login-password --region ${AWS_REGION} | \
+                              docker login --username AWS --password-stdin ${ECR_REGISTRY}
+                        """
 
                         def pushed = 0
                         services.each { svc ->
                             if (svc.build == 'true') {
-                                def imageName = "${DOCKERHUB_USER}/${PROJECT}-${svc.name}"
+                                def imageName = "${ECR_REGISTRY}/${PROJECT}-${svc.name}"
                                 sh """
                                     docker push ${imageName}:${IMAGE_TAG}
                                     docker push ${imageName}:latest
@@ -221,7 +226,6 @@ Services to build:
                             }
                         }
 
-                        // Set flag so QA pipeline only triggers when images were actually pushed
                         if (pushed > 0) {
                             env.IMAGES_PUSHED = 'true'
                             echo "📦 ${pushed} image(s) pushed — QA pipeline will be triggered"
@@ -230,12 +234,12 @@ Services to build:
                             echo "⏭️  No images pushed — QA pipeline will be skipped"
                         }
 
-                        sh 'docker logout'
+                        sh "docker logout ${ECR_REGISTRY}"
                     }
 
                     echo """
-Images on Docker Hub:
-  https://hub.docker.com/u/${DOCKERHUB_USER}
+Images pushed to ECR:
+  ${ECR_REGISTRY}/${PROJECT}-<service>
   Tag: ${IMAGE_TAG}
 """
                 }
@@ -278,7 +282,7 @@ Images on Docker Hub:
             echo """
 ╔══════════════════════════════════════════════════════╗
 ║  ✅ Dev Pipeline SUCCESS                              ║
-║  Images pushed to: hub.docker.com/u/rabtab            ║
+║  Images pushed to: ${ECR_REGISTRY}
 ║  Tag: ${IMAGE_TAG}
 ╚══════════════════════════════════════════════════════╝"""
         }
