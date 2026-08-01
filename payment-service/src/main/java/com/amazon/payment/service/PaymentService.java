@@ -4,6 +4,7 @@ import com.amazon.payment.entity.Payment;
 import com.amazon.payment.repository.PaymentRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.Builder;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.kafka.annotation.KafkaListener;
@@ -24,6 +25,7 @@ import java.util.UUID;
 @Service
 @RequiredArgsConstructor
 @Slf4j
+@Builder
 public class PaymentService {
 
     private final PaymentRepository paymentRepository;
@@ -207,64 +209,82 @@ public class PaymentService {
     }
 
     private void handleTestScenario(String orderId, String userId, BigDecimal amount, String scenario) {
-        Map<String, Object> result = new HashMap<>();
-        result.put("orderId", orderId);
-        result.put("paymentId", UUID.randomUUID().toString());
-        result.put("amount", amount);
-        result.put("timestamp", System.currentTimeMillis());
+        Payment.PaymentStatus status;
+        String transactionId = null;
+        String failureReason = null;
+        Boolean retryable = null;
+        Integer fraudScore = null;
 
         switch (scenario.toUpperCase()) {
             case "FAILED":
             case "INSUFFICIENT_FUNDS":
-                result.put("status", "FAILED");
-                result.put("transactionId", "");
-                result.put("failureReason", "Insufficient funds");
-                result.put("retryable", true);
-                log.info("🧪 Simulating: FAILED payment");
-                publishTestResult(orderId, result);
+                status = Payment.PaymentStatus.FAILED;
+                failureReason = "Insufficient funds";
+                retryable = true;
                 break;
 
             case "FRAUD":
-                result.put("status", "FAILED");
-                result.put("transactionId", "");
-                result.put("failureReason", "Fraud detected");
-                result.put("retryable", false);
-                result.put("fraudScore", 95);
-                log.info("🧪 Simulating: FAILED payment (fraud detected)");
-                publishTestResult(orderId, result);
+                status = Payment.PaymentStatus.FAILED;
+                failureReason = "Fraud detected";
+                retryable = false;
+                fraudScore = 95;
                 break;
 
             case "CARD_EXPIRED":
-                result.put("status", "FAILED");
-                result.put("transactionId", "");
-                result.put("failureReason", "Card expired");
-                result.put("retryable", false);
-                log.info("🧪 Simulating: FAILED payment (card expired)");
-                publishTestResult(orderId, result);
+                status = Payment.PaymentStatus.FAILED;
+                failureReason = "Card expired";
+                retryable = false;
                 break;
 
             case "NETWORK_ERROR":
-                result.put("status", "FAILED");
-                result.put("transactionId", "");
-                result.put("failureReason", "Network error occurred while processing payment");
-                result.put("retryable", true);
-                log.info("🧪 Simulating: FAILED payment (network error)");
-                publishTestResult(orderId, result);
+                status = Payment.PaymentStatus.FAILED;
+                failureReason = "Network error occurred while processing payment";
+                retryable = true;
                 break;
-
 
             case "TIMEOUT":
-                log.info("🧪 Simulating: TIMEOUT - no result published");
-                break;
+                log.info("🧪 Simulating: TIMEOUT - no result published, no payment record created");
+                return;   // exits the whole method — no save, no publish
 
             case "SUCCESS":
             default:
-                result.put("status", "SUCCESS");
-                result.put("transactionId", "TXN-TEST-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
-                log.info("🧪 Simulating: SUCCESS payment");
-                publishTestResult(orderId, result);
+                status = Payment.PaymentStatus.SUCCESS;
+                transactionId = "TXN-TEST-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
                 break;
         }
+
+        // Persist the Payment record
+        Payment payment = Payment.builder()
+                .orderId(UUID.fromString(orderId))
+                .userId(UUID.fromString(userId))
+                .amount(amount)
+                .status(status)
+                .paymentMethod(Payment.PaymentMethod.CREDIT_CARD)
+                .transactionId(transactionId)
+                .failureReason(failureReason)
+                .build();
+        payment = paymentRepository.save(payment);
+        log.info("🧪 Test payment record created: {} — status: {}", payment.getId(), status);
+
+        // Build ONE result map, publish it ONCE
+        Map<String, Object> result = new HashMap<>();
+        result.put("orderId", orderId);
+        result.put("paymentId", payment.getId().toString());   // real, saved payment ID
+        result.put("amount", amount);
+        result.put("timestamp", System.currentTimeMillis());
+        result.put("status", status.name());
+        result.put("transactionId", transactionId != null ? transactionId : "");
+
+        if (status == Payment.PaymentStatus.FAILED) {
+            result.put("failureReason", failureReason);
+            result.put("retryable", retryable);
+            if (fraudScore != null) {
+                result.put("fraudScore", fraudScore);
+            }
+        }
+
+        log.info("🧪 Simulating: {} payment", status);
+        publishTestResult(orderId, result);   // exactly ONE call, at the very end
     }
 
     private void publishPaymentResult(Payment payment) {
