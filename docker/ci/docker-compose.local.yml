@@ -106,6 +106,7 @@ services:
       ZOOKEEPER_TICK_TIME: 2000
       KAFKA_HEAP_OPTS: "-Xmx256m -Xms128m"
       ZOOKEEPER_4LW_COMMANDS_WHITELIST: ruok,mntr,stat
+      KAFKA_OPTS: "-Dzookeeper.4lw.commands.whitelist=*"
     networks:
       - test-net
 
