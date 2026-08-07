@@ -126,7 +126,7 @@
          */
         private void publishPaymentRequest(Order order, String testScenario) {
             Map<String, Object> paymentRequest = new HashMap<>();
-            paymentRequest.put("eventType", "PAYMENT_REQUESTED");
+            paymentRequest.put("eventType", "ORDER_CREATED");
             paymentRequest.put("orderId", order.getId().toString());
             paymentRequest.put("userId", order.getUserId().toString());
             paymentRequest.put("amount", order.getTotalAmount());
