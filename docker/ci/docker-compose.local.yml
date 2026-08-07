@@ -175,7 +175,7 @@ services:
   # passed by the dev pipeline
 
   user-service:
-    image: rabtab/amazon-user-service:${TAG_USER_SERVICE:-latest}
+    image: 978185568053.dkr.ecr.us-east-1.amazonaws.com/amazon-user-service:${TAG_USER_SERVICE:-latest}
     container_name: test-user-service
     <<: *test-label
     logging: *default-logging
@@ -219,7 +219,7 @@ services:
       start_period: 600s
 
   product-service:
-    image: rabtab/amazon-product-service:${TAG_PRODUCT_SERVICE:-latest}
+    image: 978185568053.dkr.ecr.us-east-1.amazonaws.com/amazon-product-service:${TAG_PRODUCT_SERVICE:-latest}
     container_name: test-product-service
     <<: *test-label
     logging: *default-logging
@@ -255,7 +255,7 @@ services:
       start_period: 600s
 
   order-service:
-    image: rabtab/amazon-order-service:${TAG_ORDER_SERVICE:-latest}
+    image: 978185568053.dkr.ecr.us-east-1.amazonaws.com/amazon-order-service:${TAG_ORDER_SERVICE:-latest}
     container_name: test-order-service
     <<: *test-label
     logging: *default-logging
@@ -291,7 +291,7 @@ services:
       start_period: 600s
 
   payment-service:
-    image: rabtab/amazon-payment-service:${TAG_PAYMENT_SERVICE:-latest}
+    image: 978185568053.dkr.ecr.us-east-1.amazonaws.com/amazon-payment-service:${TAG_PAYMENT_SERVICE:-latest}
     container_name: test-payment-service
     <<: *test-label
     logging: *default-logging
@@ -327,7 +327,7 @@ services:
       start_period: 120s
 
   notification-service:
-    image: rabtab/amazon-notification-service:${TAG_NOTIFICATION_SERVICE:-latest}
+    image: 978185568053.dkr.ecr.us-east-1.amazonaws.com/amazon-notification-service:${TAG_NOTIFICATION_SERVICE:-latest}
     container_name: test-notification-service
     <<: *test-label
     logging: *default-logging
@@ -345,7 +345,7 @@ services:
         condition: service_healthy
 
   api-gateway:
-    image: rabtab/amazon-api-gateway:${TAG_API_GATEWAY:-latest}
+    image: 978185568053.dkr.ecr.us-east-1.amazonaws.com/amazon-api-gateway:${TAG_API_GATEWAY:-latest}
     container_name: test-api-gateway
     <<: *test-label
     logging: *default-logging
