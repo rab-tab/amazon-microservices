@@ -36,7 +36,7 @@ public class PaymentService {
     private final Random random = new Random();
 
     @KafkaListener(
-            topics = "order.events",
+            topics = "payment.request",
             groupId = "payment-service",
             containerFactory = "kafkaListenerContainerFactory"
     )
