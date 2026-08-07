@@ -25,6 +25,15 @@ x-test-label: &test-label
     project: "amazon-local"
     managed-by: "jenkins-automation-pipeline"
 
+# Log rotation — caps every container's log file so a long-running or
+# unexpectedly leftover container can never fill the host disk (a single
+# container was found consuming 20GB after being left up ~16h unattended).
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "3"
+
 services:
 
   # ── Infrastructure ─────────────────────────────────────────────
@@ -33,6 +42,7 @@ services:
     image: postgres:15-alpine
     container_name: test-postgres
     <<: *test-label
+    logging: *default-logging
     environment:
       POSTGRES_USER: amazon
       POSTGRES_PASSWORD: amazon123
@@ -58,6 +68,7 @@ services:
     image: postgres:15-alpine
     container_name: test-db-init
     <<: *test-label
+    logging: *default-logging
     environment:
       PGPASSWORD: amazon123
     depends_on:
@@ -77,6 +88,7 @@ services:
     image: redis:7-alpine
     container_name: test-redis
     <<: *test-label
+    logging: *default-logging
     ports:
       - "6379:6379"
     command: redis-server --requirepass redis123 --maxmemory 64mb --maxmemory-policy allkeys-lru
@@ -92,6 +104,7 @@ services:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: test-zookeeper
     <<: *test-label
+    logging: *default-logging
     healthcheck:
       test:
         [
@@ -114,9 +127,10 @@ services:
     image: confluentinc/cp-kafka:7.5.0
     container_name: test-kafka
     <<: *test-label
+    logging: *default-logging
     depends_on:
-       zookeeper:
-         condition: service_healthy
+      zookeeper:
+        condition: service_healthy
     ports:
       - "9092:9092"
     environment:
@@ -149,6 +163,7 @@ services:
     image: openzipkin/zipkin-slim:latest
     container_name: test-zipkin
     <<: *test-label
+    logging: *default-logging
     ports:
       - "9411:9411"
     networks:
@@ -163,6 +178,7 @@ services:
     image: rabtab/amazon-user-service:${TAG_USER_SERVICE:-latest}
     container_name: test-user-service
     <<: *test-label
+    logging: *default-logging
     ports:
       - "8081:8081"
     environment:
@@ -206,6 +222,7 @@ services:
     image: rabtab/amazon-product-service:${TAG_PRODUCT_SERVICE:-latest}
     container_name: test-product-service
     <<: *test-label
+    logging: *default-logging
     ports:
       - "8082:8082"
     environment:
@@ -241,6 +258,7 @@ services:
     image: rabtab/amazon-order-service:${TAG_ORDER_SERVICE:-latest}
     container_name: test-order-service
     <<: *test-label
+    logging: *default-logging
     ports:
       - "8083:8083"
     environment:
@@ -276,6 +294,7 @@ services:
     image: rabtab/amazon-payment-service:${TAG_PAYMENT_SERVICE:-latest}
     container_name: test-payment-service
     <<: *test-label
+    logging: *default-logging
     ports:
       - "8084:8084"
     environment:
@@ -311,6 +330,7 @@ services:
     image: rabtab/amazon-notification-service:${TAG_NOTIFICATION_SERVICE:-latest}
     container_name: test-notification-service
     <<: *test-label
+    logging: *default-logging
     ports:
       - "8085:8085"
     environment:
@@ -328,6 +348,7 @@ services:
     image: rabtab/amazon-api-gateway:${TAG_API_GATEWAY:-latest}
     container_name: test-api-gateway
     <<: *test-label
+    logging: *default-logging
     ports:
       - "8090:8080"
     environment:
