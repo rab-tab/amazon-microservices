@@ -11,7 +11,12 @@ spec:
   resources:
     requests:
       storage: 10Gi
-  storageClassName: standard
+  # storageClassName omitted deliberately — letting the cluster use its
+  # default StorageClass is more portable than hardcoding a name. k3s's
+  # default is "local-path", not "standard" (which doesn't exist unless
+  # you've explicitly created it) — hardcoding "standard" here would have
+  # left this PVC stuck Pending forever. Check your cluster's actual
+  # default with: kubectl get storageclass
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -47,8 +52,17 @@ spec:
                 secretKeyRef:
                   name: amazon-secrets
                   key: db-password
-            - name: POSTGRES_MULTIPLE_DATABASES
-              value: "users_db,products_db,orders_db,payments_db"
+            # POSTGRES_DB creates exactly ONE database on first boot —
+            # this is the only "multi-db" mechanism the OFFICIAL postgres
+            # image actually supports natively. The remaining 3 databases
+            # are created by the init script below instead.
+            #
+            # (POSTGRES_MULTIPLE_DATABASES, which was here before, is NOT
+            # a real feature of this image — it's a convention from a
+            # different, third-party postgres image. On the official
+            # image it's silently ignored and does nothing.)
+            - name: POSTGRES_DB
+              value: "users_db"
           volumeMounts:
             - name: postgres-storage
               mountPath: /var/lib/postgresql/data
@@ -63,12 +77,12 @@ spec:
               cpu: "500m"
           readinessProbe:
             exec:
-              command: ["pg_isready", "-U", "amazon"]
+              command: ["pg_isready", "-U", "amazon", "-d", "users_db"]
             initialDelaySeconds: 10
             periodSeconds: 5
           livenessProbe:
             exec:
-              command: ["pg_isready", "-U", "amazon"]
+              command: ["pg_isready", "-U", "amazon", "-d", "users_db"]
             initialDelaySeconds: 30
             periodSeconds: 10
       volumes:
@@ -85,11 +99,19 @@ metadata:
   name: postgres-init-sql
   namespace: amazon
 data:
+  # Files in /docker-entrypoint-initdb.d/ run ONCE, only when the data
+  # directory is empty (first boot). .sql files here get executed via
+  # `psql` against the default connection (the POSTGRES_DB above).
+  #
+  # FIX: Postgres does NOT support "CREATE DATABASE IF NOT EXISTS" —
+  # that's MySQL syntax. It was causing a real SQL syntax error on every
+  # first boot, likely crash-looping the pod. Since this only ever runs
+  # once against a guaranteed-empty data directory, no existence check
+  # is needed — plain CREATE DATABASE is correct and safe here.
   init.sql: |
-    CREATE DATABASE IF NOT EXISTS users_db;
-    CREATE DATABASE IF NOT EXISTS products_db;
-    CREATE DATABASE IF NOT EXISTS orders_db;
-    CREATE DATABASE IF NOT EXISTS payments_db;
+    CREATE DATABASE products_db;
+    CREATE DATABASE orders_db;
+    CREATE DATABASE payments_db;
 ---
 apiVersion: v1
 kind: Service
