@@ -17,16 +17,16 @@ commonLabels:
   app.kubernetes.io/managed-by: kustomize
   app.kubernetes.io/part-of: amazon-microservices
 
-images:
-  - name: amazon/api-gateway
-    newTag: "1.0.0"
-  - name: amazon/user-service
-    newTag: "1.0.0"
-  - name: amazon/product-service
-    newTag: "1.0.0"
-  - name: amazon/order-service
-    newTag: "1.0.0"
-  - name: amazon/payment-service
-    newTag: "1.0.0"
-  - name: amazon/notification-service
-    newTag: "1.0.0"
+# images: block intentionally removed from source control.
+# The old static entries here (name: amazon/api-gateway, newTag: "1.0.0")
+# never matched anything real — services.yaml uses the full ECR path
+# as the image name (978185568053.dkr.ecr.us-east-1.amazonaws.com/
+# amazon-api-gateway), not the short "amazon/api-gateway" these entries
+# specified, so Kustomize's image matching silently did nothing.
+#
+# Image tags are now set dynamically, per pipeline run, via:
+#   kubectl kustomize edit set image <full-ecr-path>:<resolved-tag>
+# in the Jenkinsfile's "Deploy to Kubernetes" stage — this correctly
+# matches the real image names AND uses whatever tag Context stage
+# actually resolved that run, rather than a hardcoded "1.0.0" that
+# can't reflect per-run state at all.
