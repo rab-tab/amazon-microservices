@@ -9,7 +9,7 @@ metadata:
     app: user-service
     version: "1.0.0"
 spec:
-  replicas: 2
+  replicas: 1  # was 2 — QA doesn't need HA; halves resource footprint
   selector:
     matchLabels:
       app: user-service
@@ -28,10 +28,27 @@ spec:
         prometheus.io/path: "/actuator/prometheus"
         prometheus.io/port: "8081"
     spec:
+      # Required for containerd (k3s) to authenticate to private ECR —
+      # create once via:
+      #   kubectl create secret docker-registry ecr-registry-secret \
+      #     --docker-server=978185568053.dkr.ecr.us-east-1.amazonaws.com \
+      #     --docker-username=AWS \
+      #     --docker-password="$(aws ecr get-login-password --region us-east-1)" \
+      #     -n amazon
+      # Note: ECR tokens expire ~12h, so this secret needs periodic
+      # refresh (e.g. a CronJob, or Jenkins recreating it each run).
+      imagePullSecrets:
+        - name: ecr-registry-secret
       containers:
         - name: user-service
-          image: amazon/user-service:1.0.0
-          imagePullPolicy: IfNotPresent
+          # __TAG_USER_SERVICE__ is a placeholder — Jenkins substitutes
+          # this before `kubectl apply`, e.g.:
+          #   sed -i "s/__TAG_USER_SERVICE__/${TAG_USER_SERVICE}/" user-service.yaml
+          # mirrors the ${TAG_USER_SERVICE} pattern docker-compose used.
+          image: 978185568053.dkr.ecr.us-east-1.amazonaws.com/amazon-user-service:__TAG_USER_SERVICE__
+          imagePullPolicy: Always  # was IfNotPresent — with mutable tags
+            # like "latest", IfNotPresent would
+          # keep using a stale cached image
           ports:
             - containerPort: 8081
           envFrom:
@@ -65,16 +82,23 @@ spec:
             limits:
               memory: "512Mi"
               cpu: "500m"
+          # Switched from /actuator/health/readiness and .../liveness to
+          # plain /actuator/health — the split probe-group endpoints only
+          # exist if management.endpoint.health.probes.enabled=true is
+          # set, which we haven't confirmed for this service. Every
+          # healthcheck that's actually worked today (compose, manual
+          # curl) hit plain /actuator/health. Confirm the probes.enabled
+          # config and switch back if you want the more granular split.
           readinessProbe:
             httpGet:
-              path: /actuator/health/readiness
+              path: /actuator/health
               port: 8081
             initialDelaySeconds: 30
             periodSeconds: 10
             failureThreshold: 3
           livenessProbe:
             httpGet:
-              path: /actuator/health/liveness
+              path: /actuator/health
               port: 8081
             initialDelaySeconds: 60
             periodSeconds: 15
@@ -112,7 +136,7 @@ metadata:
     app: product-service
     version: "1.0.0"
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: product-service
@@ -131,10 +155,12 @@ spec:
         prometheus.io/path: "/actuator/prometheus"
         prometheus.io/port: "8082"
     spec:
+      imagePullSecrets:
+        - name: ecr-registry-secret
       containers:
         - name: product-service
-          image: amazon/product-service:1.0.0
-          imagePullPolicy: IfNotPresent
+          image: 978185568053.dkr.ecr.us-east-1.amazonaws.com/amazon-product-service:__TAG_PRODUCT_SERVICE__
+          imagePullPolicy: Always
           ports:
             - containerPort: 8082
           envFrom:
@@ -165,13 +191,13 @@ spec:
               cpu: "500m"
           readinessProbe:
             httpGet:
-              path: /actuator/health/readiness
+              path: /actuator/health
               port: 8082
             initialDelaySeconds: 30
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /actuator/health/liveness
+              path: /actuator/health
               port: 8082
             initialDelaySeconds: 60
             periodSeconds: 15
@@ -199,7 +225,7 @@ metadata:
     app: order-service
     version: "1.0.0"
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: order-service
@@ -218,10 +244,12 @@ spec:
         prometheus.io/path: "/actuator/prometheus"
         prometheus.io/port: "8083"
     spec:
+      imagePullSecrets:
+        - name: ecr-registry-secret
       containers:
         - name: order-service
-          image: amazon/order-service:1.0.0
-          imagePullPolicy: IfNotPresent
+          image: 978185568053.dkr.ecr.us-east-1.amazonaws.com/amazon-order-service:__TAG_ORDER_SERVICE__
+          imagePullPolicy: Always
           ports:
             - containerPort: 8083
           envFrom:
@@ -252,13 +280,13 @@ spec:
               cpu: "500m"
           readinessProbe:
             httpGet:
-              path: /actuator/health/readiness
+              path: /actuator/health
               port: 8083
             initialDelaySeconds: 30
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /actuator/health/liveness
+              path: /actuator/health
               port: 8083
             initialDelaySeconds: 60
             periodSeconds: 15
@@ -286,7 +314,7 @@ metadata:
     app: payment-service
     version: "1.0.0"
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: payment-service
@@ -305,10 +333,12 @@ spec:
         prometheus.io/path: "/actuator/prometheus"
         prometheus.io/port: "8084"
     spec:
+      imagePullSecrets:
+        - name: ecr-registry-secret
       containers:
         - name: payment-service
-          image: amazon/payment-service:1.0.0
-          imagePullPolicy: IfNotPresent
+          image: 978185568053.dkr.ecr.us-east-1.amazonaws.com/amazon-payment-service:__TAG_PAYMENT_SERVICE__
+          imagePullPolicy: Always
           ports:
             - containerPort: 8084
           envFrom:
@@ -334,13 +364,13 @@ spec:
               cpu: "500m"
           readinessProbe:
             httpGet:
-              path: /actuator/health/readiness
+              path: /actuator/health
               port: 8084
             initialDelaySeconds: 30
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /actuator/health/liveness
+              path: /actuator/health
               port: 8084
             initialDelaySeconds: 60
             periodSeconds: 15
@@ -376,10 +406,12 @@ spec:
       labels:
         app: notification-service
     spec:
+      imagePullSecrets:
+        - name: ecr-registry-secret
       containers:
         - name: notification-service
-          image: amazon/notification-service:1.0.0
-          imagePullPolicy: IfNotPresent
+          image: 978185568053.dkr.ecr.us-east-1.amazonaws.com/amazon-notification-service:__TAG_NOTIFICATION_SERVICE__
+          imagePullPolicy: Always
           ports:
             - containerPort: 8085
           envFrom:
@@ -422,7 +454,7 @@ metadata:
     app: api-gateway
     version: "1.0.0"
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: api-gateway
@@ -441,10 +473,12 @@ spec:
         prometheus.io/path: "/actuator/prometheus"
         prometheus.io/port: "8080"
     spec:
+      imagePullSecrets:
+        - name: ecr-registry-secret
       containers:
         - name: api-gateway
-          image: amazon/api-gateway:1.0.0
-          imagePullPolicy: IfNotPresent
+          image: 978185568053.dkr.ecr.us-east-1.amazonaws.com/amazon-api-gateway:__TAG_API_GATEWAY__
+          imagePullPolicy: Always
           ports:
             - containerPort: 8080
           envFrom:
@@ -470,13 +504,13 @@ spec:
               cpu: "500m"
           readinessProbe:
             httpGet:
-              path: /actuator/health/readiness
+              path: /actuator/health
               port: 8080
             initialDelaySeconds: 20
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /actuator/health/liveness
+              path: /actuator/health
               port: 8080
             initialDelaySeconds: 40
             periodSeconds: 15

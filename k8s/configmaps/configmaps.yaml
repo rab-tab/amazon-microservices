@@ -15,6 +15,12 @@ data:
   MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: "http://zipkin-service:9411/api/v2/spans"
   MANAGEMENT_TRACING_SAMPLING_PROBABILITY: "1.0"
   LOGGING_LEVEL_COM_AMAZON: "INFO"
+  # Added: matches docker-compose's MANAGEMENT_HEALTH_REDIS_ENABLED=false.
+  # Redis health checks were observed taking 13-58s under memory pressure,
+  # which would fail the plain /actuator/health readiness/liveness probes
+  # we're using (aggregate check, includes Redis indicator) even when the
+  # service itself is functionally fine.
+  MANAGEMENT_HEALTH_REDIS_ENABLED: "false"
 ---
 # Product Service ConfigMap
 apiVersion: v1
@@ -30,6 +36,7 @@ data:
   SPRING_DATA_REDIS_PORT: "6379"
   SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka-service:29092"
   MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: "http://zipkin-service:9411/api/v2/spans"
+  MANAGEMENT_HEALTH_REDIS_ENABLED: "false"
 ---
 # Order Service ConfigMap
 apiVersion: v1
@@ -47,8 +54,12 @@ data:
   MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: "http://zipkin-service:9411/api/v2/spans"
   RESILIENCE4J_CIRCUITBREAKER_INSTANCES_PAYMENTSERVICE_FAILURE_RATE_THRESHOLD: "50"
   RESILIENCE4J_CIRCUITBREAKER_INSTANCES_PAYMENTSERVICE_WAIT_DURATION_IN_OPEN_STATE: "30s"
+  MANAGEMENT_HEALTH_REDIS_ENABLED: "false"
 ---
 # Payment Service ConfigMap
+# (no Redis env vars here at all in the original — matches the fixed
+# microservices Deployment file, which also has no Redis secret ref
+# for payment-service — so no Redis health flag needed either)
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -88,3 +99,4 @@ data:
   PAYMENT_SERVICE_URL: "http://payment-service:8084"
   SPRING_DATA_REDIS_HOST: "redis-service"
   MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: "http://zipkin-service:9411/api/v2/spans"
+  MANAGEMENT_HEALTH_REDIS_ENABLED: "false"
