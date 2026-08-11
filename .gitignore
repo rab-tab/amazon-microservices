@@ -29,3 +29,7 @@ docker-volumes/
 # Logs
 *.log
 logs/
+
+# Exception: k8s test manifest contains only placeholder credentials
+# (amazon/amazon123/redis123 — confirmed via base64 decode, not real secrets)
+\!k8s/secrets/secrets.yaml
