@@ -355,6 +355,11 @@ spec:
                 secretKeyRef:
                   name: amazon-secrets
                   key: db-password
+            - name: SPRING_DATA_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: amazon-secrets
+                  key: redis-password
           resources:
             requests:
               memory: "256Mi"
