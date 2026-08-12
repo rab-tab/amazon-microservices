@@ -428,12 +428,15 @@ spec:
           envFrom:
             - configMapRef:
                 name: notification-service-config
+          env:
+            - name: JAVA_TOOL_OPTIONS
+              value: "-Xms64m -Xmx128m -XX:+UseG1GC"
           resources:
             requests:
-              memory: "128Mi"
+              memory: "192Mi"
               cpu: "100m"
             limits:
-              memory: "256Mi"
+              memory: "384Mi"
               cpu: "200m"
           readinessProbe:
             httpGet:
