@@ -269,6 +269,7 @@ metadata:
     tier: infrastructure
 spec:
   replicas: 1
+  publishNotReadyAddresses: true
   selector:
     matchLabels:
       app: kafka
