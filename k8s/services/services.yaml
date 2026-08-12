@@ -417,7 +417,6 @@ spec:
       labels:
         app: notification-service
     spec:
-      MANAGEMENT_HEALTH_DB_ENABLED: "false"
       imagePullSecrets:
         - name: ecr-registry-secret
       containers:
