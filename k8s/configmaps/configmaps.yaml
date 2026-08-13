@@ -87,6 +87,7 @@ data:
   SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka-service:29092"
   MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: "http://zipkin-service:9411/api/v2/spans"
   MANAGEMENT_HEALTH_DB_ENABLED: "false"
+  MANAGEMENT_HEALTH_REDIS_ENABLED: "false"
 ---
 # API Gateway ConfigMap
 apiVersion: v1
