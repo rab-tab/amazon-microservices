@@ -27,7 +27,7 @@ spec:
   parallelism: 3       # how many run simultaneously
   backoffLimit: 0      # don't retry a failed shard — a real test
   # failure should surface immediately
-  ttlSecondsAfterFinished: 300  # auto-cleanup finished pods after 5 min,
+  #ttlSecondsAfterFinished: 300  # auto-cleanup finished pods after 5 min,
     # so repeated runs don't accumulate
     # leftover Job objects like we saw with
   # containers earlier today
