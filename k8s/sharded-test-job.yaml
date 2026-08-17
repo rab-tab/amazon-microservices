@@ -1,20 +1,14 @@
 # ════════════════════════════════════════════════════════════════
-# Sharded test runner — K8s Indexed Job
+# Sharded test runner — K8s Indexed Job (with S3 result aggregation)
 #
-# completionMode: Indexed makes Kubernetes launch `completions` pods
-# and inject JOB_COMPLETION_INDEX (0, 1, 2, ...) into each one
-# automatically — ShardingInterceptor reads this to know which slice
-# of regression.xml it owns.
+# BUILD_ID is substituted by Jenkins at apply time (sed), so each
+# pipeline run's shard results land under a distinct S3 prefix.
 #
-# The actual test command lives in the image's own Dockerfile CMD —
-# this manifest only needs to set TOTAL_SHARDS and point at the image.
-# JOB_COMPLETION_INDEX is NOT set here — Kubernetes injects it itself,
-# setting it manually would override the real per-pod value.
-#
-# Pods run inside the "amazon" namespace directly, so BASE_URL/DB_HOST/
-# KAFKA_SERVERS/REDIS_HOST (baked into the image as in-cluster DNS
-# names — api-gateway, postgres-service, etc.) resolve correctly with
-# no port-forwarding needed.
+# AWS credentials come from a K8s Secret ("aws-s3-creds") that Jenkins
+# creates fresh before every run — same refresh-per-run pattern as
+# ecr-registry-secret, since these are just jenkins-aws-user's own
+# long-lived keys, not a short-lived token, but keeping the same
+# create-fresh-each-run habit avoids ever depending on a stale secret.
 # ════════════════════════════════════════════════════════════════
 apiVersion: batch/v1
 kind: Job
@@ -23,14 +17,12 @@ metadata:
   namespace: amazon
 spec:
   completionMode: Indexed
-  completions: 3      # total shard count — 148 tests / 3 ≈ 49 per shard
-  parallelism: 3       # how many run simultaneously
-  backoffLimit: 0      # don't retry a failed shard — a real test
-  # failure should surface immediately
-  #ttlSecondsAfterFinished: 300  # auto-cleanup finished pods after 5 min,
-    # so repeated runs don't accumulate
-    # leftover Job objects like we saw with
-  # containers earlier today
+  completions: 3
+  parallelism: 3
+  backoffLimit: 0
+  # ttlSecondsAfterFinished intentionally omitted — Jenkins' own
+  # aggregation step needs the pods to still exist right after
+  # completion; cleanup happens explicitly in the Jenkinsfile instead.
   template:
     spec:
       restartPolicy: Never
@@ -43,6 +35,22 @@ spec:
           env:
             - name: TOTAL_SHARDS
               value: "3"
+            - name: BUILD_ID
+              value: "__BUILD_ID__"   # substituted by Jenkins before apply
+            - name: S3_BUCKET
+              value: "amazon-microservices-build-artifacts-978185568053"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: aws-s3-creds
+                  key: access-key-id
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: aws-s3-creds
+                  key: secret-access-key
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
           resources:
             requests:
               memory: "512Mi"
