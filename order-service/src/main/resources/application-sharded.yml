@@ -5,27 +5,47 @@ spring:
       shard0:
         type: com.zaxxer.hikari.HikariDataSource
         driver-class-name: org.postgresql.Driver
-        jdbc-url: jdbc:postgresql://order-db-shard0:5432/orders
+        jdbc-url: jdbc:postgresql://toxiproxy:15432/orders
         username: ${SHARD0_USER}
         password: ${SHARD0_PASS}
+        connection-timeout: 5000
+        validation-timeout: 3000
+        data-source-properties:
+          socketTimeout: 8
+          connectTimeout: 5
       shard1:
         type: com.zaxxer.hikari.HikariDataSource
         driver-class-name: org.postgresql.Driver
-        jdbc-url: jdbc:postgresql://order-db-shard1:5432/orders
+        jdbc-url: jdbc:postgresql://toxiproxy:15433/orders
         username: ${SHARD1_USER}
         password: ${SHARD1_PASS}
+        connection-timeout: 5000
+        validation-timeout: 3000
+        data-source-properties:
+          socketTimeout: 8
+          connectTimeout: 5
       shard2:
         type: com.zaxxer.hikari.HikariDataSource
         driver-class-name: org.postgresql.Driver
-        jdbc-url: jdbc:postgresql://order-db-shard2:5432/orders
+        jdbc-url: jdbc:postgresql://toxiproxy:15434/orders
         username: ${SHARD2_USER}
         password: ${SHARD2_PASS}
+        connection-timeout: 5000
+        validation-timeout: 3000
+        data-source-properties:
+          socketTimeout: 8
+          connectTimeout: 5
       shard3:
         type: com.zaxxer.hikari.HikariDataSource
         driver-class-name: org.postgresql.Driver
-        jdbc-url: jdbc:postgresql://order-db-shard3:5432/orders
+        jdbc-url: jdbc:postgresql://toxiproxy:15435/orders
         username: ${SHARD3_USER}
         password: ${SHARD3_PASS}
+        connection-timeout: 5000
+        validation-timeout: 3000
+        data-source-properties:
+          socketTimeout: 8
+          connectTimeout: 5
 
     rules:
       sharding:
@@ -34,7 +54,7 @@ spring:
             actual-data-nodes: shard$->{0..3}.orders
             table-strategy:
               standard:
-                sharding-column: customer_id
+                sharding-column: user_id
                 sharding-algorithm-name: order-inline
             key-generate-strategy:
               column: id
@@ -43,25 +63,28 @@ spring:
           order-inline:
             type: INLINE
             props:
-              algorithm-expression: shard$->{customer_id % 4}
+              algorithm-expression: shard$->{Math.abs(user_id.hashCode()) % 4}
         key-generators:
           snowflake:
             type: SNOWFLAKE
 
     props:
       sql-show: true
-  app:
-    sharding-migration:
-      shards:
-        - url: jdbc:postgresql://order-db-shard0:5432/orders
-          username: ${SHARD0_USER}
-          password: ${SHARD0_PASS}
-        - url: jdbc:postgresql://order-db-shard1:5432/orders
-          username: ${SHARD1_USER}
-          password: ${SHARD1_PASS}
-        - url: jdbc:postgresql://order-db-shard2:5432/orders
-          username: ${SHARD2_USER}
-          password: ${SHARD2_PASS}
-        - url: jdbc:postgresql://order-db-shard3:5432/orders
-          username: ${SHARD3_USER}
-          password: ${SHARD3_PASS}
+
+app:
+  sharding-migration:
+    # Direct to real Postgres, bypassing Toxiproxy — migrations run once
+    # at startup, before any test has a chance to break a proxy.
+    shards:
+      - url: jdbc:postgresql://order-db-shard0:5432/orders
+        username: ${SHARD0_USER}
+        password: ${SHARD0_PASS}
+      - url: jdbc:postgresql://order-db-shard1:5432/orders
+        username: ${SHARD1_USER}
+        password: ${SHARD1_PASS}
+      - url: jdbc:postgresql://order-db-shard2:5432/orders
+        username: ${SHARD2_USER}
+        password: ${SHARD2_PASS}
+      - url: jdbc:postgresql://order-db-shard3:5432/orders
+        username: ${SHARD3_USER}
+        password: ${SHARD3_PASS}

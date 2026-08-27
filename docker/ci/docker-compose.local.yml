@@ -3,31 +3,16 @@
 # File: amazon-microservices/docker/ci/docker-compose.local.yml
 #
 # Used BY the automation pipeline — not started manually.
-# The automation Jenkinsfile does:
-#   docker-compose -f docker-compose.local.yml up -d postgres redis kafka
-#   ... wait for health ...
-#   docker-compose -f docker-compose.local.yml up -d user-service ...
-#   ... run tests ...
-#   docker-compose -f docker-compose.local.yml down -v
-#
-# Container naming: prefix "test-" to avoid clashing with any
-# containers you might have running from other docker-compose files.
-#
-# Images: pulled from Docker Hub (rabtab)
-#         pushed there by the dev pipeline
+# ...
 # ════════════════════════════════════════════════════════════════
 
 version: '3.8'
 
-# Label all containers — used for selective cleanup
 x-test-label: &test-label
   labels:
     project: "amazon-local"
     managed-by: "jenkins-automation-pipeline"
 
-# Log rotation — caps every container's log file so a long-running or
-# unexpectedly leftover container can never fill the host disk (a single
-# container was found consuming 20GB after being left up ~16h unattended).
 x-default-logging: &default-logging
   driver: json-file
   options:
@@ -51,8 +36,6 @@ services:
       - "5432:5432"
     networks:
       - test-net
-    # tmpfs = RAM disk. Postgres data lives in memory.
-    # WHY? Much faster than disk I/O in tests. Data doesn't need to survive.
     tmpfs:
       - /var/lib/postgresql/data
     healthcheck:
@@ -61,9 +44,6 @@ services:
       timeout: 3s
       retries: 15
 
-  # ── Database Initializer ──────────────────────────────────────
-  # Runs ONCE after postgres is healthy, creates remaining databases,
-  # then exits. No file mounts needed — avoids Rancher Desktop permission errors.
   db-init:
     image: postgres:15-alpine
     container_name: test-db-init
@@ -136,8 +116,6 @@ services:
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      # PLAINTEXT_HOST = how external tools (tests, CLI) reach Kafka
-      # PLAINTEXT      = how containers reach each other internally
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
@@ -145,14 +123,13 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
       KAFKA_HEAP_OPTS: "-Xmx192m -Xms96m"
-      KAFKA_LOG_RETENTION_MS: 300000      # 5 min — ephemeral test data
+      KAFKA_LOG_RETENTION_MS: 300000
     networks:
       - test-net
     healthcheck:
       test: [
         "CMD-SHELL",
         "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"
-        #"bash -c '</dev/tcp/localhost/9092'"
       ]
       interval: 10s
       timeout: 10s
@@ -169,10 +146,110 @@ services:
     networks:
       - test-net
 
+  # ── Sharded order-service test infra (Partition Routing tests) ──
+  # NOT part of the default pipeline run — only started when explicitly
+  # targeting the sharding test suite, e.g.:
+  #   docker-compose -f docker-compose.local.yml up -d toxiproxy \
+  #     order-db-shard0 order-db-shard1 order-db-shard2 order-db-shard3 \
+  #     order-service-sharded
+
+  order-db-shard0:
+    image: postgres:16-alpine
+    container_name: test-order-db-shard0
+    <<: *test-label
+    logging: *default-logging
+    environment:
+      POSTGRES_USER: amazon
+      POSTGRES_PASSWORD: amazon123
+      POSTGRES_DB: orders
+    networks:
+      - test-net
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U amazon -d orders"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  order-db-shard1:
+    image: postgres:16-alpine
+    container_name: test-order-db-shard1
+    <<: *test-label
+    logging: *default-logging
+    environment:
+      POSTGRES_USER: amazon
+      POSTGRES_PASSWORD: amazon123
+      POSTGRES_DB: orders
+    networks:
+      - test-net
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U amazon -d orders"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  order-db-shard2:
+    image: postgres:16-alpine
+    container_name: test-order-db-shard2
+    <<: *test-label
+    logging: *default-logging
+    environment:
+      POSTGRES_USER: amazon
+      POSTGRES_PASSWORD: amazon123
+      POSTGRES_DB: orders
+    networks:
+      - test-net
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U amazon -d orders"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  order-db-shard3:
+    image: postgres:16-alpine
+    container_name: test-order-db-shard3
+    <<: *test-label
+    logging: *default-logging
+    environment:
+      POSTGRES_USER: amazon
+      POSTGRES_PASSWORD: amazon123
+      POSTGRES_DB: orders
+    networks:
+      - test-net
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U amazon -d orders"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    container_name: test-toxiproxy
+    <<: *test-label
+    logging: *default-logging
+    ports:
+      - "8474:8474"
+      - "15432-15435:15432-15435"
+    networks:
+      - test-net
+    depends_on:
+      order-db-shard0:
+        condition: service_healthy
+      order-db-shard1:
+        condition: service_healthy
+      order-db-shard2:
+        condition: service_healthy
+      order-db-shard3:
+        condition: service_healthy
+
   # ── Microservices ──────────────────────────────────────────────
-  # All pull from Docker Hub: rabtab/amazon-<service>:<tag>
-  # IMAGE_TAG is set by the automation pipeline from the parameter
-  # passed by the dev pipeline
 
   user-service:
     image: 978185568053.dkr.ecr.us-east-1.amazonaws.com/amazon-user-service:${TAG_USER_SERVICE:-latest}
@@ -195,12 +272,7 @@ services:
       SPRING_DATA_REDIS_PASSWORD: redis123
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       SPRING_SECURITY_JWT_SECRET: local-test-jwt-secret-minimum-256-bits-required-here
-      # WHY JAVA_TOOL_OPTIONS? Unlike JAVA_OPTS, it's automatically read by the JVM
-      # before main() starts, so Spring Boot's JarLauncher picks it up correctly.
       JAVA_TOOL_OPTIONS: "-Xms64m -Xmx256m -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Djava.security.egd=file:/dev/./urandom"
-      # WHY exclude Redis from health? Redis health check takes 13-58s under memory pressure,
-      # causing actuator/health to return SLOW/DOWN even when the service is functionally UP.
-      # The app still USES Redis — we just don't block startup on Redis health status.
       MANAGEMENT_HEALTH_REDIS_ENABLED: "false"
     networks:
       - test-net
@@ -290,6 +362,54 @@ services:
       retries: 20
       start_period: 600s
 
+  # NOT started by default — separate container so the standard
+  # order-service (single-DB) pipeline run is completely unaffected.
+  # UNVERIFIED: mixing "sharded" into SPRING_PROFILES_ACTIVE alongside
+  # local-test,cb-test has not been confirmed against how order-service's
+  # base application.yml sets SPRING_DATASOURCE_URL — if the base profile's
+  # single-datasource config and the sharded profile's ShardingSphere
+  # datasource config both try to configure a DataSource bean, this may
+  # need SPRING_DATASOURCE_URL explicitly unset/excluded for this
+  # container. Confirm on first real run before trusting this config.
+  order-service-sharded:
+    image: 978185568053.dkr.ecr.us-east-1.amazonaws.com/amazon-order-service:${TAG_ORDER_SERVICE:-latest}
+    container_name: test-order-service-sharded
+    <<: *test-label
+    logging: *default-logging
+    ports:
+      - "8093:8083"
+    environment:
+      SPRING_PROFILES_ACTIVE: local-test,cb-test,sharded
+      MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: http://zipkin:9411/api/v2/spans
+      SPRING_JPA_OPEN_IN_VIEW: "false"
+      SPRING_MAIN_LAZY_INITIALIZATION: "true"
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PASSWORD: redis123
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      JAVA_TOOL_OPTIONS: "-Xms64m -Xmx256m -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Djava.security.egd=file:/dev/./urandom"
+      MANAGEMENT_HEALTH_REDIS_ENABLED: "false"
+      SHARD0_USER: amazon
+      SHARD0_PASS: amazon123
+      SHARD1_USER: amazon
+      SHARD1_PASS: amazon123
+      SHARD2_USER: amazon
+      SHARD2_PASS: amazon123
+      SHARD3_USER: amazon
+      SHARD3_PASS: amazon123
+    networks:
+      - test-net
+    depends_on:
+      toxiproxy:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8083/actuator/health | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 600s
+
   payment-service:
     image: 978185568053.dkr.ecr.us-east-1.amazonaws.com/amazon-payment-service:${TAG_PAYMENT_SERVICE:-latest}
     container_name: test-payment-service
@@ -301,7 +421,6 @@ services:
       SPRING_PROFILES_ACTIVE: local-test
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/payments_db
       SPRING_JPA_OPEN_IN_VIEW: "false"
-      #SPRING_MAIN_LAZY_INITIALIZATION: "true"
       SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: "3"
       SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE: "1"
       SPRING_DATASOURCE_USERNAME: amazon
@@ -352,9 +471,6 @@ services:
     ports:
       - "8090:8080"
     environment:
-      # WHY docker profile? The gateway's application.yml has a 'docker' profile
-      # with correct container hostnames (user-service:8081 etc).
-      # local-test profile uses localhost which doesn't work inside Docker.
       SPRING_PROFILES_ACTIVE: docker
       SPRING_DATA_REDIS_HOST: redis
       SPRING_DATA_REDIS_PASSWORD: redis123
@@ -366,8 +482,6 @@ services:
     networks:
       - test-net
     depends_on:
-      # WHY only redis/kafka? Gateway just proxies — it doesn't need backends
-      # healthy to start. Removing backend depends_on cuts startup wait by ~5min.
       redis:
         condition: service_healthy
       kafka:
