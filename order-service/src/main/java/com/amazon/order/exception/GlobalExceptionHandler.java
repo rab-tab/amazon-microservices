@@ -1,6 +1,7 @@
 package com.amazon.order.exception;
 
 import lombok.extern.slf4j.Slf4j;
+import org.apache.shardingsphere.infra.util.exception.external.sql.ShardingSphereSQLException;
 import org.hibernate.StaleObjectStateException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
@@ -134,6 +135,23 @@ public class GlobalExceptionHandler {
 
         return ResponseEntity
                 .status(HttpStatus.CONFLICT)
+                .body(errorResponse);
+    }
+
+    @ExceptionHandler(ShardingSphereSQLException.class)
+    public ResponseEntity<Map<String, Object>> handleShardingSphereException(
+            ShardingSphereSQLException ex) {
+
+        log.warn("Sharding routing/query error: {}", ex.getMessage());
+
+        Map<String, Object> errorResponse = new LinkedHashMap<>();
+        errorResponse.put("timestamp", LocalDateTime.now());
+        errorResponse.put("status", HttpStatus.BAD_REQUEST.value());
+        errorResponse.put("error", "Sharding Error");
+        errorResponse.put("message", "Unsupported or invalid sharded query: " + ex.getMessage());
+
+        return ResponseEntity
+                .status(HttpStatus.BAD_REQUEST)
                 .body(errorResponse);
     }
 

@@ -1,0 +1,67 @@
+spring:
+  shardingsphere:
+    datasource:
+      names: shard0,shard1,shard2,shard3
+      shard0:
+        type: com.zaxxer.hikari.HikariDataSource
+        driver-class-name: org.postgresql.Driver
+        jdbc-url: jdbc:postgresql://order-db-shard0:5432/orders
+        username: ${SHARD0_USER}
+        password: ${SHARD0_PASS}
+      shard1:
+        type: com.zaxxer.hikari.HikariDataSource
+        driver-class-name: org.postgresql.Driver
+        jdbc-url: jdbc:postgresql://order-db-shard1:5432/orders
+        username: ${SHARD1_USER}
+        password: ${SHARD1_PASS}
+      shard2:
+        type: com.zaxxer.hikari.HikariDataSource
+        driver-class-name: org.postgresql.Driver
+        jdbc-url: jdbc:postgresql://order-db-shard2:5432/orders
+        username: ${SHARD2_USER}
+        password: ${SHARD2_PASS}
+      shard3:
+        type: com.zaxxer.hikari.HikariDataSource
+        driver-class-name: org.postgresql.Driver
+        jdbc-url: jdbc:postgresql://order-db-shard3:5432/orders
+        username: ${SHARD3_USER}
+        password: ${SHARD3_PASS}
+
+    rules:
+      sharding:
+        tables:
+          orders:
+            actual-data-nodes: shard$->{0..3}.orders
+            table-strategy:
+              standard:
+                sharding-column: customer_id
+                sharding-algorithm-name: order-inline
+            key-generate-strategy:
+              column: id
+              key-generator-name: snowflake
+        sharding-algorithms:
+          order-inline:
+            type: INLINE
+            props:
+              algorithm-expression: shard$->{customer_id % 4}
+        key-generators:
+          snowflake:
+            type: SNOWFLAKE
+
+    props:
+      sql-show: true
+  app:
+    sharding-migration:
+      shards:
+        - url: jdbc:postgresql://order-db-shard0:5432/orders
+          username: ${SHARD0_USER}
+          password: ${SHARD0_PASS}
+        - url: jdbc:postgresql://order-db-shard1:5432/orders
+          username: ${SHARD1_USER}
+          password: ${SHARD1_PASS}
+        - url: jdbc:postgresql://order-db-shard2:5432/orders
+          username: ${SHARD2_USER}
+          password: ${SHARD2_PASS}
+        - url: jdbc:postgresql://order-db-shard3:5432/orders
+          username: ${SHARD3_USER}
+          password: ${SHARD3_PASS}
