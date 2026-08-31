@@ -1,0 +1,49 @@
+dataSources:
+  shard0:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: org.postgresql.Driver
+    jdbcUrl: jdbc:postgresql://toxiproxy:15432/orders
+    username: ${SHARD0_USER}
+    password: ${SHARD0_PASS}
+  shard1:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: org.postgresql.Driver
+    jdbcUrl: jdbc:postgresql://toxiproxy:15433/orders
+    username: ${SHARD1_USER}
+    password: ${SHARD1_PASS}
+  shard2:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: org.postgresql.Driver
+    jdbcUrl: jdbc:postgresql://toxiproxy:15434/orders
+    username: ${SHARD2_USER}
+    password: ${SHARD2_PASS}
+  shard3:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: org.postgresql.Driver
+    jdbcUrl: jdbc:postgresql://toxiproxy:15435/orders
+    username: ${SHARD3_USER}
+    password: ${SHARD3_PASS}
+
+rules:
+  - !SHARDING
+    tables:
+      orders:
+        actualDataNodes: shard$->{0..3}.orders
+        tableStrategy:
+          standard:
+            shardingColumn: user_id
+            shardingAlgorithmName: order-inline
+        keyGenerateStrategy:
+          column: id
+          keyGeneratorName: snowflake
+    shardingAlgorithms:
+      order-inline:
+        type: INLINE
+        props:
+          algorithm-expression: shard$->{Math.abs(user_id.hashCode()) % 4}
+    keyGenerators:
+      snowflake:
+        type: SNOWFLAKE
+
+props:
+  sql-show: true

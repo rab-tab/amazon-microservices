@@ -1,7 +1,7 @@
 package com.amazon.order.exception;
 
 import lombok.extern.slf4j.Slf4j;
-import org.apache.shardingsphere.infra.util.exception.external.sql.ShardingSphereSQLException;
+import org.apache.shardingsphere.infra.exception.external.sql.ShardingSphereSQLException;
 import org.hibernate.StaleObjectStateException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpStatus;

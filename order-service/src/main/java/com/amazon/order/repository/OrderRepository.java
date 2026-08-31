@@ -13,10 +13,7 @@ import java.util.UUID;
 @Repository
 public interface OrderRepository extends JpaRepository<Order, UUID> {
     Page<Order> findByUserId(UUID userId, Pageable pageable);
-    // ⭐ NEW: Scope idempotency to user
     Optional<Order> findByUserIdAndIdempotencyKey(UUID userId, String idempotencyKey);
-
     Optional<Order> findByIdempotencyKey(String idempotencyKey);
     List<Order> findByUserIdAndStatus(UUID userId, Order.OrderStatus status);
-    Optional<Order> findByIdAndCustomerId(Long id, Long customerId);
 }
