@@ -53,7 +53,7 @@ spring:
           predicates:
             - Path=/api/users/test/**
           filters:
-            - RewritePath=/api/users/test/(?<segment>.*), /api/v1/users/test/${segment}
+            - RewritePath=/api/users/test/(?<segment>.*), /api/v1/test/${segment}
 
         # User Registration (Rate Limited by IP)
         - id: user-service-register
@@ -124,7 +124,12 @@ spring:
                 key-resolver: "#{@userKeyResolver}"
 
         # ========== PRODUCT SERVICE ==========
-
+        - id: product-service-test
+          uri: http://localhost:8082
+          predicates:
+            - Path=/api/products/test/**
+          filters:
+            - RewritePath=/api/products/test/(?<segment>.*), /api/v1/test/${segment}
         # List Products (Public, Rate Limited by IP)
         - id: product-service-list
           uri: http://localhost:8082
@@ -189,7 +194,7 @@ spring:
           predicates:
             - Path=/api/orders/test/**
           filters:
-            - RewritePath=/api/orders/test/(?<segment>.*), /api/v1/orders/test/${segment}
+            - RewritePath=/api/orders/test/(?<segment>.*), /api/v1/test/${segment}
 
         - id: order-service-fault-injection
           uri: http://localhost:8083
@@ -257,6 +262,13 @@ spring:
                 key-resolver: "#{@userKeyResolver}"
 
         # ========== PAYMENT SERVICE ==========
+        # ⭐ Test Endpoints (NO CircuitBreaker, NO Rate Limiting) - MUST BE FIRST
+        - id: payment-service-test
+          uri: http://localhost:8084
+          predicates:
+            - Path=/api/payments/test/**
+          filters:
+            - RewritePath=/api/payments/test/(?<segment>.*), /api/v1/test/${segment}
 
         - id: payment-service
           uri: http://localhost:8084

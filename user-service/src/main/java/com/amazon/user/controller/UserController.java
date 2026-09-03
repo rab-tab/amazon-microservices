@@ -10,6 +10,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.Map;
 import java.util.UUID;
 
 @RestController
@@ -68,8 +69,8 @@ public class UserController {
     }
 
     @GetMapping("/api/v1/users/health")
-    public ResponseEntity<String> health() {
-        return ResponseEntity.ok("User Service is running");
+    public ResponseEntity<Map<String, Object>> health() {
+        return ResponseEntity.ok(Map.of("status", "UP", "service", "user-service"));
     }
 
     @GetMapping("/api/v1/test/secure")
