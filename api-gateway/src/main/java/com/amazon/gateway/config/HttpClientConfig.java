@@ -2,6 +2,7 @@ package com.amazon.gateway.config;
 
 import io.netty.channel.ChannelOption;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
@@ -11,14 +12,31 @@ import reactor.netty.resources.ConnectionProvider;
 import java.time.Duration;
 
 /**
- * HTTP Client Configuration with ENFORCED timeouts
+ * HTTP Client Configuration with ENFORCED timeouts.
  *
- * Sets timeouts at the Netty HTTP client level.
- * This is the most reliable way to enforce timeouts in Spring Cloud Gateway.
+ * FIX: previously hardcoded connect-timeout (1000ms) and response-timeout
+ * (3s) as Java literals, completely ignoring the equivalent properties
+ * under spring.cloud.gateway.httpclient in application.yml. Since this
+ * @Bean replaces Spring Cloud Gateway's own auto-configured
+ * ReactorClientHttpConnector (which normally reads those YAML properties
+ * automatically), the YAML values were silently dead — editing
+ * response-timeout in application.yml had no effect, which caused real
+ * confusion when diagnosing timeout behavior under load.
+ *
+ * Now reads both values from application.yml via @Value, so editing the
+ * YAML actually changes behavior as expected, while keeping this bean's
+ * explicit connection-pool configuration (which has no direct YAML
+ * equivalent in this codebase).
  */
 @Configuration
 @Slf4j
 public class HttpClientConfig {
+
+    @Value("${spring.cloud.gateway.httpclient.connect-timeout:1000}")
+    private int connectTimeoutMillis;
+
+    @Value("${spring.cloud.gateway.httpclient.response-timeout:PT3S}")
+    private Duration responseTimeout;
 
     @Bean
     public ReactorClientHttpConnector reactorClientHttpConnector() {
@@ -36,18 +54,14 @@ public class HttpClientConfig {
                 .evictInBackground(Duration.ofSeconds(120))
                 .build();
 
-        // Create HTTP client with timeouts
+        // Create HTTP client with timeouts — now sourced from application.yml
         HttpClient httpClient = HttpClient.create(connectionProvider)
-                // Connect timeout - how long to wait for connection to be established
-                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 1000)
-
-                // Response timeout - CRITICAL! This enforces the 3-second limit
-                // If backend doesn't respond within 3 seconds, request is cancelled
-                .responseTimeout(Duration.ofSeconds(3));
+                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, connectTimeoutMillis)
+                .responseTimeout(responseTimeout);
 
         log.info("✅ HTTP Client configured:");
-        log.info("   - Connect timeout: 1000ms (1 second)");
-        log.info("   - Response timeout: 3000ms (3 seconds)");
+        log.info("   - Connect timeout: {}ms", connectTimeoutMillis);
+        log.info("   - Response timeout: {}", responseTimeout);
         log.info("   - Max connections: 100");
         log.info("   - Connection pool: gateway");
 

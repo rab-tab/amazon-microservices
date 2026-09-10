@@ -82,14 +82,31 @@ public class OrderService {
         log.info("Creating order for user: {} with idempotency key: {}", userId, idempotencyKey);
 
         // ═══════════════════════════════════════════════════════════════
+        // ⏱️ TIMING — stage breakdown to isolate slow paths (Redis/DB/Kafka)
+        // ═══════════════════════════════════════════════════════════════
+        long t0 = System.currentTimeMillis();
+
+        // ═══════════════════════════════════════════════════════════════
         // CHECK IDEMPOTENCY
         // ═══════════════════════════════════════════════════════════════
-        String existingOrderId = idempotencyService.checkAndAcquire(userId, idempotencyKey);
+        OrderIdempotencyService.IdempotencyCheckResult idempotencyResult =
+                idempotencyService.checkAndAcquire(userId, idempotencyKey);
+        long tIdempotencyCheck = System.currentTimeMillis();
 
-        if (existingOrderId != null) {
+        // ⭐ Captured once here and threaded through storeOrderId()/releaseLock()
+        // below so they can skip their own Redis attempts entirely once Redis
+        // is already known unreachable for this request, instead of each
+        // independently re-discovering that via its own timeout.
+        boolean redisAvailable = idempotencyResult.redisAvailable();
+
+        if (idempotencyResult.isDuplicate()) {
+            String existingOrderId = idempotencyResult.existingOrderId();
             log.info("🔄 Duplicate request detected - returning existing order: {}", existingOrderId);
             meterRegistry.counter("orders.duplicate_detected").increment();
             OrderDto.OrderResponse existingOrder = getOrderByIdWithPolling(UUID.fromString(existingOrderId));
+            long tDuplicatePoll = System.currentTimeMillis();
+            log.info("⏱️ TIMING (duplicate path) — idempotencyCheck: {}ms, duplicatePoll: {}ms, total: {}ms",
+                    tIdempotencyCheck - t0, tDuplicatePoll - tIdempotencyCheck, tDuplicatePoll - t0);
             return new OrderResult(existingOrder, true);
         }
 
@@ -137,10 +154,15 @@ public class OrderService {
                         .orElseThrow(() -> e); // shouldn't happen, but fail loudly if it does
                 return new OrderResult(mapToResponse(existing), true);
             }
+            long tDbSave = System.currentTimeMillis();
+
             // ═══════════════════════════════════════════════════════════════
             // STORE IDEMPOTENCY MAPPING (Release lock)
+            // redisAvailable threaded through: skips Redis entirely if Redis
+            // was already known down during the idempotency check above.
             // ═══════════════════════════════════════════════════════════════
-            idempotencyService.storeOrderId(userId, idempotencyKey, order.getId());
+            idempotencyService.storeOrderId(userId, idempotencyKey, order.getId(), redisAvailable);
+            long tStoreIdempotency = System.currentTimeMillis();
 
             // ═══════════════════════════════════════════════════════════════
             // PUBLISH EVENTS
@@ -152,18 +174,28 @@ public class OrderService {
             applicationEventPublisher.publishEvent(
                     new OrderCreatedEvent(this, order, testScenario)
             );
+            long tPublishEvent = System.currentTimeMillis();
 
             meterRegistry.counter("orders.created").increment();
+
+            log.info("⏱️ TIMING — idempotencyCheck: {}ms, dbSave: {}ms, storeIdempotency: {}ms, publishEvent: {}ms, total: {}ms",
+                    tIdempotencyCheck - t0,
+                    tDbSave - tIdempotencyCheck,
+                    tStoreIdempotency - tDbSave,
+                    tPublishEvent - tStoreIdempotency,
+                    tPublishEvent - t0);
 
             return new OrderResult(mapToResponse(order), false);
 
         } catch (Exception e) {
             // ═══════════════════════════════════════════════════════════════
             // ROLLBACK: Release lock on failure
+            // redisAvailable threaded through here too — skips the Redis
+            // delete if Redis was already known down this request.
             // ═══════════════════════════════════════════════════════════════
             log.error("❌ Order creation failed - releasing lock", e);
             try {
-                idempotencyService.releaseLock(userId, idempotencyKey);
+                idempotencyService.releaseLock(userId, idempotencyKey, redisAvailable);
             } catch (Exception lockReleaseError) {
                 log.error("Failed to release lock during cleanup — it will expire via TTL", lockReleaseError);
                 // deliberately swallow this — don't let it hide the real problem below

@@ -21,7 +21,8 @@ spring:
   data:
     redis:
       host: localhost
-      port: 6379
+      #port: 6379
+      port: 8666
       password: redis123
   jackson:
     serialization:

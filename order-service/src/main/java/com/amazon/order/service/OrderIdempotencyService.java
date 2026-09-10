@@ -30,6 +30,16 @@ import java.util.UUID;
  * 3. If lock acquired → check for duplicates with lock protection
  * 4. If duplicate found → return it and release lock
  * 5. If new request → keep lock until order is created
+ *
+ * ⭐ REDIS-DOWN SHORT-CIRCUIT
+ * checkAndAcquire() now returns an IdempotencyCheckResult carrying a
+ * redisAvailable flag alongside the existing-order-id. When Redis is
+ * unreachable, that flag is false and the caller (OrderService) threads it
+ * into storeOrderId()/releaseLock() so those methods skip their own Redis
+ * attempts entirely instead of independently re-discovering "Redis is down"
+ * via their own ~timeout each. Without this, a single request during a
+ * Redis outage previously paid the connect-timeout THREE separate times
+ * (lock acquire, cache set, lock release) — this cuts that to one.
  */
 @Service
 @Slf4j
@@ -46,6 +56,21 @@ public class OrderIdempotencyService {
     private static final int MAX_POLL_ATTEMPTS = 50;  // 50 * 100ms = 5 seconds max wait
     private static final long POLL_INTERVAL_MS = 100;  // Check every 100ms
     private static final int LOCK_TTL_SECONDS = 30;    // Lock expires after 30 seconds
+
+    /**
+     * Result of an idempotency check.
+     *
+     * @param existingOrderId order id if this is a duplicate request, null if new
+     * @param redisAvailable  whether Redis was reachable during this check —
+     *                        false means the caller should skip further Redis
+     *                        attempts for the rest of this request (storeOrderId,
+     *                        releaseLock) rather than re-paying the timeout
+     */
+    public record IdempotencyCheckResult(String existingOrderId, boolean redisAvailable) {
+        public boolean isDuplicate() {
+            return existingOrderId != null;
+        }
+    }
 
     @PostConstruct
     public void init() {
@@ -66,9 +91,11 @@ public class OrderIdempotencyService {
      *
      * @param userId User creating the order
      * @param idempotencyKey Unique key from request header
-     * @return Existing order ID if duplicate, null if new request (with lock held)
+     * @return IdempotencyCheckResult — existingOrderId is set if duplicate, null if
+     *         new request (with lock held); redisAvailable is false if Redis was
+     *         unreachable during this check (caller should skip further Redis calls)
      */
-    public String checkAndAcquire(UUID userId, String idempotencyKey) {
+    public IdempotencyCheckResult checkAndAcquire(UUID userId, String idempotencyKey) {
         String cacheKey = buildKey(userId, idempotencyKey);
         String lockKey = cacheKey + ":lock";
 
@@ -84,28 +111,45 @@ public class OrderIdempotencyService {
             lockAcquired = redisTemplate.opsForValue()
                     .setIfAbsent(lockKey, "processing", Duration.ofSeconds(LOCK_TTL_SECONDS));
         } catch (Exception e) {
-            log.warn("⚠️ Redis unreachable while acquiring lock for: {} — falling back to DB-only check", idempotencyKey, e);
-            return checkDbOnly(userId, idempotencyKey);
+            log.warn("⚠️ Redis unreachable while acquiring lock for: {} — falling back to DB-only check, " +
+                    "and skipping further Redis attempts for the rest of this request", idempotencyKey, e);
+            return new IdempotencyCheckResult(checkDbOnly(userId, idempotencyKey), false);
         }
 
         if (Boolean.FALSE.equals(lockAcquired)) {
             // Lock is held by another request - this is a duplicate request
             // Poll until the first request completes and the order appears
             log.info("⏳ Lock already held for: {}. Polling for order creation...", idempotencyKey);
-            return pollForOrder(userId, idempotencyKey, cacheKey);
+            return new IdempotencyCheckResult(pollForOrder(userId, idempotencyKey, cacheKey), true);
         }
 
         // ═══════════════════════════════════════════════════════════════
         // ⭐ STEP 2: Lock acquired - NOW check for duplicates (with lock protection)
         // ═══════════════════════════════════════════════════════════════
+        // Redis was reachable for the lock acquire above; track whether it
+        // stays reachable through the rest of this check so the result
+        // accurately reflects it either way.
+        boolean redisAvailable = true;
+
         try {
-            // Check Redis cache (fast path) — best-effort, falls through to DB on failure
-            String cachedOrderId = safeRedisGet(cacheKey);
+            // Check Redis cache (fast path) — inline try/catch (not the safe* helper)
+            // so we can capture whether this specific call failed due to Redis
+            // being down, rather than collapsing "genuine miss" and "Redis error"
+            // into the same null.
+            String cachedOrderId;
+            try {
+                cachedOrderId = redisTemplate.opsForValue().get(cacheKey);
+            } catch (Exception e) {
+                log.warn("Redis GET failed for key={} — falling back to DB", cacheKey, e);
+                cachedOrderId = null;
+                redisAvailable = false;
+            }
+
             if (cachedOrderId != null) {
                 log.info("🔄 Idempotency HIT in cache: {} → Order: {}", idempotencyKey, cachedOrderId);
                 // Duplicate found - release lock and return existing order
                 releaseLockInternal(lockKey, idempotencyKey);
-                return cachedOrderId;
+                return new IdempotencyCheckResult(cachedOrderId, redisAvailable);
             }
 
             // Check database (cache miss - might be Redis restart, TTL expired, or GET failed above)
@@ -117,12 +161,15 @@ public class OrderIdempotencyService {
                 log.info("🔄 Idempotency HIT in DB (cache miss): {} → Order: {}",
                         idempotencyKey, orderId);
 
-                // Rebuild cache for next time — best-effort, doesn't fail the request if it can't
-                safeRedisSet(cacheKey, orderId, Duration.ofSeconds(ttlSeconds));
+                // Rebuild cache for next time — best-effort, and only attempted if
+                // Redis hasn't already been marked unreachable this request
+                if (redisAvailable) {
+                    safeRedisSet(cacheKey, orderId, Duration.ofSeconds(ttlSeconds));
+                }
 
                 // Duplicate found - release lock and return existing order
                 releaseLockInternal(lockKey, idempotencyKey);
-                return orderId;
+                return new IdempotencyCheckResult(orderId, redisAvailable);
             }
 
             // ═══════════════════════════════════════════════════════════════
@@ -130,9 +177,9 @@ public class OrderIdempotencyService {
             // ═══════════════════════════════════════════════════════════════
             log.info("✅ New idempotency key - lock acquired: {}", idempotencyKey);
 
-            // Return null to signal "new request"
+            // Return null orderId to signal "new request"
             // Lock stays held and will be released by storeOrderId() after order creation
-            return null;
+            return new IdempotencyCheckResult(null, redisAvailable);
 
         } catch (Exception e) {
             // On any error during duplicate check, release lock immediately
@@ -215,15 +262,28 @@ public class OrderIdempotencyService {
      * 1. Stores the order ID in Redis cache with TTL
      * 2. Releases the distributed lock
      *
-     * The lock MUST be held when this is called (from checkAndAcquire returning null)
+     * The lock MUST be held when this is called (from checkAndAcquire returning
+     * a null existingOrderId)
      *
      * @param userId User ID
      * @param idempotencyKey Idempotency key
      * @param orderId Created order ID
+     * @param redisAvailable from the checkAndAcquire() result for this request —
+     *                        if false, Redis is already known unreachable and
+     *                        both the cache set AND the lock-release delete are
+     *                        skipped entirely (the lock, if any was ever actually
+     *                        acquired in Redis, self-cleans via its 30s TTL)
      */
-    public void storeOrderId(UUID userId, String idempotencyKey, UUID orderId) {
+    public void storeOrderId(UUID userId, String idempotencyKey, UUID orderId, boolean redisAvailable) {
         String cacheKey = buildKey(userId, idempotencyKey);
         String lockKey = cacheKey + ":lock";
+
+        if (!redisAvailable) {
+            log.info("⏭️ Skipping Redis store/lock-release for {} — Redis already known unreachable " +
+                    "this request (order {} was still created successfully via DB; lock, if any, " +
+                    "self-expires via its {}s TTL)", idempotencyKey, orderId, LOCK_TTL_SECONDS);
+            return;
+        }
 
         try {
             // Store order ID in Redis with TTL
@@ -247,15 +307,39 @@ public class OrderIdempotencyService {
     }
 
     /**
-     * Release lock on failure (rollback scenario)
+     * Release lock on failure (rollback scenario).
      *
-     * Called when order creation fails after lock was acquired.
-     * This allows other requests to retry the operation.
+     * Prefer {@link #releaseLock(UUID, String, boolean)} when the caller has a
+     * redisAvailable flag from checkAndAcquire() — this overload always attempts
+     * the Redis delete and exists for callers without that context.
      *
      * @param userId User ID
      * @param idempotencyKey Idempotency key
      */
     public void releaseLock(UUID userId, String idempotencyKey) {
+        releaseLock(userId, idempotencyKey, true);
+    }
+
+    /**
+     * Release lock on failure (rollback scenario), Redis-outage-aware.
+     *
+     * Called when order creation fails after lock was acquired. This allows
+     * other requests to retry the operation.
+     *
+     * @param userId User ID
+     * @param idempotencyKey Idempotency key
+     * @param redisAvailable from the checkAndAcquire() result for this request —
+     *                        if false, the Redis delete is skipped (nothing to
+     *                        release if Redis was down when the lock would have
+     *                        been acquired; any real lock self-expires via TTL)
+     */
+    public void releaseLock(UUID userId, String idempotencyKey, boolean redisAvailable) {
+        if (!redisAvailable) {
+            log.info("⏭️ Skipping Redis lock-release for {} — Redis already known unreachable this request",
+                    idempotencyKey);
+            return;
+        }
+
         String cacheKey = buildKey(userId, idempotencyKey);
         String lockKey = cacheKey + ":lock";
 
@@ -348,30 +432,12 @@ public class OrderIdempotencyService {
         return Boolean.TRUE.equals(exists);
     }
 
-    private String safeRedisGet(String key) {
-        try {
-            return redisTemplate.opsForValue().get(key);
-        } catch (Exception e) {
-            log.warn("Redis GET failed for key={} — falling back to DB", key, e);
-            return null; // treat as "not found in cache", exactly like a normal cache miss
-        }
-    }
-
     private void safeRedisSet(String key, String value, Duration ttl) {
         try {
             redisTemplate.opsForValue().set(key, value, ttl);
         } catch (Exception e) {
             log.warn("Redis SET failed for key={} — cache not updated, DB remains source of truth", key, e);
             // deliberately no rethrow — this is best-effort only
-        }
-    }
-
-    private void safeReleaseLock(String lockKey, String idempotencyKey) {
-        try {
-            redisTemplate.delete(lockKey);
-        } catch (Exception e) {
-            log.error("Failed to release lock for key={} — will expire via TTL", idempotencyKey, e);
-            // deliberately no rethrow — TTL is the safety net
         }
     }
 
