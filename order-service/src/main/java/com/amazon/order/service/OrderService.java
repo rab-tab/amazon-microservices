@@ -316,6 +316,29 @@ public class OrderService {
         return mapToResponse(order);
     }
 
+    /**
+     * ⭐ NEW — properly (userId, idempotencyKey)-scoped lookup.
+     *
+     * getOrderByIdempotencyKey() above looks up by key ALONE, which is
+     * unsafe wherever two different users could share the same key string
+     * (the DB constraint is composite — uk_user_idempotency on
+     * (user_id, idempotency_key) — so this is a real, not theoretical,
+     * possibility; confirmed by testIdempotencyKeyScopedToUser). Use this
+     * scoped version for any caller that has the userId available, rather
+     * than the key-only lookup. OrderController's
+     * catch (DataIntegrityViolationException) block was the one confirmed
+     * caller of the unscoped version that had userId available and wasn't
+     * using it — switched over as part of this fix.
+     */
+    @Transactional(readOnly = true)
+    public OrderDto.OrderResponse getOrderByUserIdAndIdempotencyKey(UUID userId, String idempotencyKey) {
+        log.debug("Fetching order by userId: {} and idempotency key: {}", userId, idempotencyKey);
+        Order order = orderRepository.findByUserIdAndIdempotencyKey(userId, idempotencyKey)
+                .orElseThrow(() -> new OrderNotFoundException(
+                        "Order not found for user: " + userId + " and idempotency key: " + idempotencyKey));
+        return mapToResponse(order);
+    }
+
     @Transactional(readOnly = true)
     public OrderDto.OrderResponse getOrderById(UUID id) {
         Order order = orderRepository.findById(id)

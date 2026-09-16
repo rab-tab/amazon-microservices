@@ -130,7 +130,13 @@ public class OrderController {
 
         } catch (DataIntegrityViolationException e) {
             log.warn("Duplicate detected by database constraint (race condition): {}", idempotencyKey);
-            OrderDto.OrderResponse existingOrder = orderService.getOrderByIdempotencyKey(idempotencyKey);
+            // ⭐ FIX: was orderService.getOrderByIdempotencyKey(idempotencyKey) —
+            // key-only lookup, unsafe since two different users can legitimately
+            // share the same idempotency key string (the DB constraint is
+            // composite: user_id + idempotency_key). Switched to the properly
+            // scoped lookup now that userId is available in this scope.
+            OrderDto.OrderResponse existingOrder =
+                    orderService.getOrderByUserIdAndIdempotencyKey(UUID.fromString(userId), idempotencyKey);
             return ResponseEntity.ok(existingOrder);
 
         } catch (Exception e) {

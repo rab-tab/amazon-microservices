@@ -31,6 +31,10 @@ public class PaymentService {
     private final PaymentRepository paymentRepository;
     private final KafkaTemplate<String, Object> kafkaTemplate;
     private final ObjectMapper objectMapper;
+    // ⭐ NEWLY WIRED IN — was built but never injected/called anywhere.
+    // Provides an atomic setIfAbsent-based check to close the race window
+    // below (see processOrderCreatedEvent()).
+    private final IdempotencyService idempotencyService;
 
     private static final String PAYMENT_RESULT_TOPIC = "payment.result";
     private final Random random = new Random();
@@ -141,7 +145,11 @@ public class PaymentService {
         log.info("     User ID: {}", userId);
         log.info("     Amount: {}", amount);
         // ═══════════════════════════════════════════════════════════════
-        // ✅ IDEMPOTENCY CHECK: Does payment already exist for this order?
+        // ✅ IDEMPOTENCY CHECK (PART 1) — DB lookup: has this order already
+        // been FULLY processed before? If so, re-publish the result (covers
+        // the case where the original publish to payment.result failed) and
+        // stop. This does NOT by itself close the concurrent-race window —
+        // see PART 2 below for that.
         // ═══════════════════════════════════════════════════════════════
         UUID orderUuid = UUID.fromString(orderId);
         Optional<Payment> existingPayment = paymentRepository.findByOrderId(orderUuid);
@@ -158,6 +166,32 @@ public class PaymentService {
             publishPaymentResult(existing);
 
             return;  // ← Skip processing, return early
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // ⭐ IDEMPOTENCY CHECK (PART 2) — NEWLY ADDED atomic gate.
+        //
+        // The DB check above has a real race window: if two ORDER_CREATED
+        // events for the same order arrive close together (a retried Kafka
+        // delivery, or the order-service duplicate-publisher issue flagged
+        // separately), BOTH can reach this point having seen
+        // existingPayment.isPresent() == false, since neither has committed
+        // a Payment row yet. Without this check, both would proceed into
+        // processPayment()/handleTestScenario() below and each create their
+        // own Payment row — a genuine double-charge risk, with no DB unique
+        // constraint on orderId to catch it as a last resort (unconfirmed
+        // either way, but nothing in this class relies on one existing).
+        //
+        // isNewEvent() is an atomic Redis SETNX-equivalent (single round
+        // trip) — exactly one concurrent caller gets `true`; every other
+        // concurrent caller for the same orderId gets `false` immediately
+        // and skips, rather than racing into the DB write.
+        // ═══════════════════════════════════════════════════════════════
+        if (!idempotencyService.isNewEvent(orderId)) {
+            log.warn("⚠️  Concurrent ORDER_CREATED event detected via idempotency lock for order: {} — " +
+                    "another request is already processing this order's payment, skipping to avoid " +
+                    "a duplicate Payment record", orderId);
+            return;
         }
 
         log.info("   ✓ No existing payment found - proceeding with payment processing");
