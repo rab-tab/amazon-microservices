@@ -16,6 +16,8 @@ import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.hibernate.StaleObjectStateException;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
@@ -48,6 +50,19 @@ public class OrderService {
     private final ObjectMapper objectMapper;
     private final ApplicationEventPublisher applicationEventPublisher;
     private final OrderIdempotencyService idempotencyService;
+
+    // ⭐ Self-injection (lazy, field-based — deliberately NOT via the Lombok
+    // @RequiredArgsConstructor constructor, since @Lazy isn't reliably
+    // carried onto Lombok-generated constructor parameters). Required so
+    // cancelOrder() below calls cancelOrderInternal() THROUGH the Spring
+    // proxy, not via a plain `this.` call. @Transactional has no effect on
+    // same-class self-invocation — a classic Spring AOP proxy limitation —
+    // so without this, splitting the method would silently fix nothing.
+    // @Lazy breaks the circular dependency this would otherwise cause at
+    // bean-creation time (this bean depending on a proxy of itself).
+    @Autowired
+    @Lazy
+    private OrderService self;
 
     private static final String ORDER_EVENTS_TOPIC = "order.events";
     private static final int MAX_POLL_ATTEMPTS = 50;
@@ -358,13 +373,45 @@ public class OrderService {
                 .build();
     }
 
+    /**
+     * Cancel an order — thin retry wrapper.
+     *
+     * ⭐ SPLIT FROM the actual cancel logic (now cancelOrderInternal()).
+     * @Retryable and @Transactional on the SAME method is a known-fragile
+     * Spring anti-pattern: proxy ordering between the two isn't guaranteed,
+     * so a retry attempt can end up reusing an already-rollback-marked
+     * transaction, or reading through a stale persistence-context cache
+     * instead of the genuinely fresh row it needs to see. Confirmed via a
+     * failing test (testConcurrentCancelRequests_OptimisticLockingResolvesGracefully)
+     * that the combined-annotation version exhausted all 3 retry attempts
+     * under real concurrency without ever once reaching the idempotent
+     * no-op branch below — the retries were happening, but never seeing
+     * fresh data.
+     *
+     * Calls self.cancelOrderInternal() — THROUGH the Spring proxy via the
+     * injected `self` field, not `this.` — so each retry attempt gets a
+     * genuinely new transaction and a genuinely new persistence context,
+     * not a poisoned/stale one left over from the previous attempt.
+     */
     @Retryable(
             retryFor = {ObjectOptimisticLockingFailureException.class, StaleObjectStateException.class},
             maxAttempts = 3,
             backoff = @Backoff(delay = 100, multiplier = 2)
     )
-    @Transactional
     public OrderDto.OrderResponse cancelOrder(UUID orderId, UUID userId) {
+        return self.cancelOrderInternal(orderId, userId);
+    }
+
+    /**
+     * Actual cancel logic — runs in its own fresh transaction on every call,
+     * including every retry attempt from cancelOrder() above. Kept public
+     * (not private/protected) because Spring's CGLIB proxy needs a method
+     * it can genuinely override to apply @Transactional advice — this
+     * method should still only ever be called via cancelOrder(), not
+     * invoked directly from outside this class.
+     */
+    @Transactional
+    public OrderDto.OrderResponse cancelOrderInternal(UUID orderId, UUID userId) {
         Order order = orderRepository.findById(orderId)
                 .orElseThrow(() -> new OrderNotFoundException("Order not found: " + orderId));
 
@@ -441,12 +488,36 @@ public class OrderService {
             log.info("✅ Found order - Current status: {}", order.getStatus());
 
             if ("SUCCESS".equals(paymentStatus)) {
+                // ⭐ GUARD — prevents a payment.result message that arrives
+                // AFTER a cancellation from silently resurrecting a
+                // CANCELLED order back to CONFIRMED. Found via
+                // testCancelAlreadyCancelledOrder_IsIdempotent: the
+                // background payment saga completed and overwrote a just-
+                // cancelled order with no check and no warning. Without
+                // this, cancellation was not actually a terminal state.
+                if (order.getStatus() == Order.OrderStatus.CANCELLED) {
+                    log.warn("⚠️  Payment SUCCESS result arrived for order {} but it's already " +
+                            "CANCELLED — ignoring, NOT overwriting status back to CONFIRMED", orderId);
+                    return;
+                }
                 log.info("💳 Processing SUCCESS payment");
                 order.setStatus(Order.OrderStatus.CONFIRMED);
                 order.setPaymentId(UUID.fromString(paymentId));
                 order.setPaymentTransactionId(transactionId);
                 meterRegistry.counter("orders.confirmed").increment();
             } else {
+                // ⭐ GUARD — same reasoning as the SUCCESS branch above: a
+                // payment FAILED result arriving after cancellation
+                // shouldn't overwrite CANCELLED with PAYMENT_FAILED either.
+                // Deliberately scoped to CANCELLED only — NOT guarding
+                // FAILED-vs-CONFIRMED or similar, since a failed payment
+                // legitimately CAN be retried into a later success per
+                // isRetryable(); that's real business flow, not a bug.
+                if (order.getStatus() == Order.OrderStatus.CANCELLED) {
+                    log.warn("⚠️  Payment FAILED result arrived for order {} but it's already " +
+                            "CANCELLED — ignoring, NOT overwriting status to PAYMENT_FAILED", orderId);
+                    return;
+                }
                 log.info("💳 Processing FAILED payment - Reason: {}", failureReason);
                 order.setStatus(Order.OrderStatus.PAYMENT_FAILED);
                 order.setPaymentFailureReason(failureReason);
