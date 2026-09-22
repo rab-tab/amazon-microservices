@@ -23,6 +23,7 @@ import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.retry.annotation.Backoff;
 import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.HashMap;
@@ -120,6 +121,17 @@ public class ProductService {
      * concurrent updates to different fields silently lost one of them —
      * every save "succeeded" (200) with no conflict ever detected.
      *
+     * ⚠️ @Transactional(propagation = NOT_SUPPORTED) is REQUIRED here,
+     * unlike OrderService.cancelOrder() — ProductService carries a
+     * CLASS-LEVEL @Transactional, so a method with no explicit annotation
+     * silently INHERITS it rather than running non-transactionally. Without
+     * this explicit override, this method would still open (or join) a
+     * transaction itself, and self.updateProductInternal() below would
+     * just join that SAME transaction each retry (default REQUIRED
+     * propagation) instead of starting a genuinely fresh one — silently
+     * reproducing the exact bug this split exists to fix. Confirmed via a
+     * real 500/StaleObjectStateException before this line was added.
+     *
      * @CacheEvict stays on this outer method — it only fires after a
      * successful return, so a failed/retried attempt never evicts
      * prematurely, and it's naturally idempotent if it ever did fire more
@@ -131,6 +143,7 @@ public class ProductService {
             maxAttempts = 3,
             backoff = @Backoff(delay = 100, multiplier = 2)
     )
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     @CacheEvict(value = PRODUCT_CACHE, key = "#id")
     public ProductDto.ProductResponse updateProduct(UUID id, ProductDto.UpdateRequest request, UUID sellerId) {
         return self.updateProductInternal(id, request, sellerId);
