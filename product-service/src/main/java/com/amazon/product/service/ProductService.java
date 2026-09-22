@@ -9,13 +9,19 @@ import io.micrometer.core.annotation.Timed;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.hibernate.StaleObjectStateException;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
+import org.springframework.retry.annotation.Backoff;
+import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -35,6 +41,19 @@ public class ProductService {
 
     private static final String PRODUCT_EVENTS_TOPIC = "product.events";
     private static final String PRODUCT_CACHE = "products";
+
+    // ⭐ Self-injection (lazy, field-based — not via the Lombok
+    // @RequiredArgsConstructor constructor, same reason as OrderService's
+    // equivalent field: @Lazy isn't reliably carried onto Lombok-generated
+    // constructor parameters). Required so updateProduct() below calls
+    // updateProductInternal() THROUGH the Spring proxy, not via a plain
+    // `this.` call — @Transactional has no effect on same-class
+    // self-invocation, a classic Spring AOP proxy limitation. @Lazy breaks
+    // the circular dependency this would otherwise cause at bean-creation
+    // time (this bean depending on a proxy of itself).
+    @Autowired
+    @Lazy
+    private ProductService self;
 
     public ProductDto.ProductResponse createProduct(ProductDto.CreateRequest request, UUID sellerId) {
         Product product = Product.builder()
@@ -88,8 +107,45 @@ public class ProductService {
         return mapToPagedResponse(products);
     }
 
+    /**
+     * Update a product — thin retry wrapper.
+     *
+     * ⭐ SPLIT FROM the actual update logic (now updateProductInternal()).
+     * Same fix, same reasoning, as OrderService.cancelOrder(): @Retryable
+     * and @Transactional on the same method is a fragile Spring
+     * anti-pattern (proxy ordering isn't guaranteed), which can leave a
+     * retry attempt reusing a rollback-marked transaction or a stale
+     * persistence-context read. Confirmed via ProductUpdateConcurrencyTest
+     * that, before this fix, Product had no @Version at all, so two
+     * concurrent updates to different fields silently lost one of them —
+     * every save "succeeded" (200) with no conflict ever detected.
+     *
+     * @CacheEvict stays on this outer method — it only fires after a
+     * successful return, so a failed/retried attempt never evicts
+     * prematurely, and it's naturally idempotent if it ever did fire more
+     * than once, unlike the transaction/persistence-context state that
+     * forced the cancelOrder() split in the first place.
+     */
+    @Retryable(
+            retryFor = {ObjectOptimisticLockingFailureException.class, StaleObjectStateException.class},
+            maxAttempts = 3,
+            backoff = @Backoff(delay = 100, multiplier = 2)
+    )
     @CacheEvict(value = PRODUCT_CACHE, key = "#id")
     public ProductDto.ProductResponse updateProduct(UUID id, ProductDto.UpdateRequest request, UUID sellerId) {
+        return self.updateProductInternal(id, request, sellerId);
+    }
+
+    /**
+     * Actual update logic — runs in its own fresh transaction on every
+     * call, including every retry attempt from updateProduct() above.
+     * Kept public (not private/protected) so Spring's CGLIB proxy can
+     * genuinely override it to apply @Transactional advice — should still
+     * only ever be called via updateProduct(), not invoked directly from
+     * outside this class.
+     */
+    @Transactional
+    public ProductDto.ProductResponse updateProductInternal(UUID id, ProductDto.UpdateRequest request, UUID sellerId) {
         Product product = productRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Product not found: " + id));
 

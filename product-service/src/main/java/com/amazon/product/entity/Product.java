@@ -60,6 +60,21 @@ public class Product {
     @Builder.Default
     private ProductStatus status = ProductStatus.ACTIVE;
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // OPTIMISTIC LOCKING & METADATA
+    // ⭐ ADDED — Product previously had no @Version at all, confirmed via
+    // ProductUpdateConcurrencyTest to cause a genuine silent lost-update:
+    // two concurrent updateProduct() calls on different fields (name vs
+    // price) both returned 200, but whichever save() committed second
+    // silently reverted the other's already-committed change. See
+    // ProductService.updateProductInternal() and
+    // ProductRepository.updateStock() for the matching fixes this requires.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Version
+    @Column(name = "version")
+    private Long version;
+
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;
