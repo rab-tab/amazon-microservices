@@ -11,6 +11,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.hibernate.StaleObjectStateException;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.cache.Cache;
+import org.springframework.cache.CacheManager;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.context.annotation.Lazy;
@@ -22,6 +24,7 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.retry.annotation.Backoff;
 import org.springframework.retry.annotation.Retryable;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -39,9 +42,18 @@ public class ProductService {
     private final ProductRepository productRepository;
     private final KafkaTemplate<String, Object> kafkaTemplate;
     private final MeterRegistry meterRegistry;
+    // ⭐ NEW — needed for scheduleDelayedCacheEvict()'s programmatic eviction.
+    // @CacheEvict alone can only fire synchronously at method-return time;
+    // a DELAYED eviction needs direct CacheManager access instead.
+    private final CacheManager cacheManager;
 
     private static final String PRODUCT_EVENTS_TOPIC = "product.events";
     private static final String PRODUCT_CACHE = "products";
+    // Delay before the second eviction fires — tunable. Long enough to give
+    // a straggling in-flight read time to finish and populate the cache,
+    // short enough that any window where the cache serves stale data is
+    // brief rather than indefinite.
+    private static final long DELAYED_EVICT_MS = 500;
 
     // ⭐ Self-injection (lazy, field-based — not via the Lombok
     // @RequiredArgsConstructor constructor, same reason as OrderService's
@@ -146,7 +158,46 @@ public class ProductService {
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     @CacheEvict(value = PRODUCT_CACHE, key = "#id")
     public ProductDto.ProductResponse updateProduct(UUID id, ProductDto.UpdateRequest request, UUID sellerId) {
-        return self.updateProductInternal(id, request, sellerId);
+        ProductDto.ProductResponse result = self.updateProductInternal(id, request, sellerId);
+
+        // ⭐ NEW — "delayed double-delete", the standard mitigation for the
+        // cache-aside eviction race: a concurrent getProductById() that
+        // started its DB read BEFORE this update committed can still finish
+        // AFTER the @CacheEvict above fires, and populate the cache with the
+        // now-stale value it read — leaving the cache permanently wrong
+        // (correct in DB, wrong in cache) until something else evicts it.
+        // Scheduling a SECOND eviction a short moment later catches that
+        // straggling stale write and clears it out too. This narrows the
+        // race window; it does not mathematically eliminate it — there's no
+        // fully airtight fix for this using plain declarative Spring Cache
+        // annotations. Called via self. (not this.) — required, since @Async
+        // is proxy-based AOP just like @Transactional/@Retryable, and a
+        // plain self-invocation would bypass the proxy and either run
+        // synchronously or silently do nothing async at all.
+        self.scheduleDelayedCacheEvict(id);
+
+        return result;
+    }
+
+    /**
+     * Fire-and-forget second eviction, DELAYED_EVICT_MS after the
+     * originating update. See updateProduct()'s comment for why this
+     * exists. Deliberately best-effort: this narrows the cache-aside race
+     * window, it doesn't close it completely.
+     */
+    @Async
+    public void scheduleDelayedCacheEvict(UUID id) {
+        try {
+            Thread.sleep(DELAYED_EVICT_MS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return;
+        }
+        Cache cache = cacheManager.getCache(PRODUCT_CACHE);
+        if (cache != null) {
+            cache.evict(id);
+            log.debug("Delayed cache eviction fired for product {}", id);
+        }
     }
 
     /**
@@ -199,6 +250,16 @@ public class ProductService {
         product.setStatus(Product.ProductStatus.DISCONTINUED);
         productRepository.save(product);
         publishProductEvent("PRODUCT_DELETED", product);
+
+        // ⭐ NEW — same cache-aside eviction race as updateProduct() had: a
+        // concurrent getProductById() that started its DB read before this
+        // delete committed can finish after the @CacheEvict above fires,
+        // repopulating the cache with the pre-delete (still-ACTIVE) product
+        // — meaning a "deleted" product could keep appearing as available
+        // indefinitely. Same delayed-double-delete mitigation, same
+        // self.-not-this. requirement (see updateProduct()'s comment for
+        // the full explanation).
+        self.scheduleDelayedCacheEvict(id);
     }
 
     private void publishProductEvent(String eventType, Product product) {
