@@ -23,6 +23,8 @@ public class OrderEvent {
     private String shippingAddress;
     private LocalDateTime timestamp;
     private String testScenario;
+    private Integer schemaVersion;
+
 
     @Getter
     @Setter

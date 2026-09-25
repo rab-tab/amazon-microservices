@@ -565,7 +565,7 @@ public class OrderService {
                 .totalAmount(order.getTotalAmount())
                 .status(order.getStatus())
                 .shippingAddress(order.getShippingAddress())
-                .timestamp(LocalDateTime.now())
+                .timestamp(LocalDateTime.now()).schemaVersion(1)
                 .testScenario(testScenario)
                 .items(order.getItems().stream()
                         .map(item -> OrderEvent.OrderItemEvent.builder()
