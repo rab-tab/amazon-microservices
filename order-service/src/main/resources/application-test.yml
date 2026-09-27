@@ -1,10 +1,11 @@
 spring:
+  kafka:
+    bootstrap-servers: localhost:9099
   data:
     redis:
       host: localhost
       port: 8666
       timeout: 2000ms
-
-order:
-  idempotency:
-    ttl-seconds: 5  # ⭐ 5 seconds for testing (vs 86400 in production)
+  order:
+    idempotency:
+      ttl-seconds: 5
