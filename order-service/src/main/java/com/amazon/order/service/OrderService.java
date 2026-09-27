@@ -19,6 +19,7 @@ import org.hibernate.StaleObjectStateException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.event.EventListener;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -75,6 +76,11 @@ public class OrderService {
         private final boolean isDuplicate;
     }
 
+    @EventListener
+    public void onOrderCreated(OrderCreatedEvent event) {
+        log.info("📨 Handling OrderCreatedEvent for order: {}", event.getOrder().getId());
+        publishOrderEvent("ORDER_CREATED", event.getOrder(), event.getTestScenario());
+    }
     /**
      * Create a new order and publish events to Kafka
      *
