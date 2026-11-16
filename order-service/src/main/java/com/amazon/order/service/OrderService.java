@@ -25,6 +25,7 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.support.SendResult;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.retry.annotation.Backoff;
 import org.springframework.retry.annotation.Retryable;
@@ -38,6 +39,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
 @Service
 @RequiredArgsConstructor
@@ -563,7 +565,11 @@ public class OrderService {
         return false;
     }
 
-    private void publishOrderEvent(String eventType, Order order,String testScenario) {
+    private CompletableFuture<SendResult<String, Object>> publishOrderEvent(
+            String eventType,
+            Order order,
+            String testScenario) {
+
         OrderEvent event = OrderEvent.builder()
                 .eventType(eventType)
                 .orderId(order.getId())
@@ -571,7 +577,8 @@ public class OrderService {
                 .totalAmount(order.getTotalAmount())
                 .status(order.getStatus())
                 .shippingAddress(order.getShippingAddress())
-                .timestamp(LocalDateTime.now()).schemaVersion(1)
+                .timestamp(LocalDateTime.now())
+                .schemaVersion(1)
                 .testScenario(testScenario)
                 .items(order.getItems().stream()
                         .map(item -> OrderEvent.OrderItemEvent.builder()
@@ -582,8 +589,38 @@ public class OrderService {
                         .toList())
                 .build();
 
-        kafkaTemplate.send(ORDER_EVENTS_TOPIC, order.getId().toString(), event);
-        log.info("📤 Published {} event for order: {}", eventType, order.getId());
+        String orderId = order.getId().toString();
+
+        log.info(
+                "Publishing {} event for order {} to topic {}",
+                eventType,
+                orderId,
+                ORDER_EVENTS_TOPIC
+        );
+
+        CompletableFuture<SendResult<String, Object>> future =
+                kafkaTemplate.send(ORDER_EVENTS_TOPIC, orderId, event);
+
+        return future.whenComplete((result, exception) -> {
+            if (exception == null) {
+                log.info(
+                        "Successfully published {} for order {} | topic={} | partition={} | offset={}",
+                        eventType,
+                        orderId,
+                        result.getRecordMetadata().topic(),
+                        result.getRecordMetadata().partition(),
+                        result.getRecordMetadata().offset()
+                );
+            } else {
+                log.error(
+                        "Failed to publish {} for order {} after producer retry attempts. Topic: {}",
+                        eventType,
+                        orderId,
+                        ORDER_EVENTS_TOPIC,
+                        exception
+                );
+            }
+        });
     }
 
     private OrderDto.OrderResponse mapToResponse(Order order) {

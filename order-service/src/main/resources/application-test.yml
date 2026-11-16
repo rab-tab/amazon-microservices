@@ -1,6 +1,6 @@
 spring:
-  kafka:
-    bootstrap-servers: localhost:9099
+  #kafka:
+   # bootstrap-servers: localhost:9099
   data:
     redis:
       host: localhost
