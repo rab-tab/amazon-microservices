@@ -40,7 +40,8 @@ public class PaymentService {
     private final Random random = new Random();
 
     @KafkaListener(
-            topics = "order.events",  // ✅ CORRECT - listen to where order service publishes
+            id = "payment-order-events-listener",
+            topics = "order.events",
             groupId = "payment-service",
             containerFactory = "kafkaListenerContainerFactory"
     )
@@ -99,8 +100,18 @@ public class PaymentService {
             throw e;
 
         } catch (Exception e) {
-            log.error("❌ Business logic error processing event: {}", e.getMessage(), e);
+            log.error(
+                    "❌ Business logic error processing event: {}",
+                    e.getMessage(),
+                    e
+            );
+
             log.error("════════════════════════════════════════════════════════");
+
+            throw new RuntimeException(
+                    "Failed to process ORDER_CREATED event",
+                    e
+            );
         }
     }
 
@@ -187,12 +198,12 @@ public class PaymentService {
         // concurrent caller for the same orderId gets `false` immediately
         // and skips, rather than racing into the DB write.
         // ═══════════════════════════════════════════════════════════════
-        if (!idempotencyService.isNewEvent(orderId)) {
+       /* if (!idempotencyService.isNewEvent(orderId)) {
             log.warn("⚠️  Concurrent ORDER_CREATED event detected via idempotency lock for order: {} — " +
                     "another request is already processing this order's payment, skipping to avoid " +
                     "a duplicate Payment record", orderId);
             return;
-        }
+        }*/
 
         log.info("   ✓ No existing payment found - proceeding with payment processing");
 

@@ -51,7 +51,7 @@ public class KafkaConsumerConfig {
 
         // Consumer behavior
         config.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-        config.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, true);  // Auto-commit enabled
+        config.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);  // Auto-commit enabled
 
         log.info("✅ Kafka Consumer Factory configured");
         log.info("   Bootstrap servers: {}", bootstrapServers);
